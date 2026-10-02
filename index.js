@@ -23,6 +23,42 @@ function createMcpServer() {
   });
 
   server.tool(
+    'get_cart',
+    'Retrieve the active quick-commerce cart items and total amount',
+    {},
+    async () => ({
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          status: 'ACTIVE',
+          items: [{ sku: 'Imported Olive Oil 1L', price: 450, quantity: 1 }],
+          total_amount: 450,
+          currency: 'INR'
+        }, null, 2)
+      }]
+    })
+  );
+
+  server.tool(
+    'add_to_cart',
+    'Add items to the active cart',
+    {
+      item: z.string(),
+      amount: z.number().default(450)
+    },
+    async ({ item, amount }) => ({
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          status: 'UPDATED',
+          item_added: item,
+          cart_total: amount
+        }, null, 2)
+      }]
+    })
+  );
+
+  server.tool(
     'gnani_speech_to_text',
     'Transcribe incoming user or cook voice notes into text with emotional context tagging',
     {
