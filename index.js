@@ -215,30 +215,37 @@ function createMcpServer() {
 }
 
 const handleSse = async (req, res) => {
-  console.log('--- Incoming SSE Handshake ---');
-  // Cloudflare buffers small SSE writes. A comment larger than the proxy
-  // buffer forces the session endpoint through to the MCP client.
+  console.log(`[SSE] Incoming handshake`);
   res.setHeader('X-Accel-Buffering', 'no');
-  // Cloudflare Tunnel flushes streaming responses in 256KB blocks and
-  // holds anything smaller until the connection closes. The endpoint event
-  // has to sit at the front of a block large enough to flush.
-  const flushPadding = `\n:${' '.repeat(512 * 1024)}\n\n`;
-  const originalWrite = res.write.bind(res);
-  res.write = (chunk, encoding, callback) => {
-    if (Buffer.isBuffer(chunk)) chunk = chunk.toString('utf8');
-    return originalWrite(chunk + flushPadding, encoding, callback);
-  };
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Content-Type', 'text/event-stream');
 
-  const transport = new SSEServerTransport('/messages', res);
+  const host = req.get('host');
+  const proto = req.headers['x-forwarded-proto'] || req.protocol;
+  const endpoint = `${proto}://${host}/messages`;
+
+  const transport = new SSEServerTransport(endpoint, res);
   const server = createMcpServer();
 
   transports.set(transport.sessionId, transport);
+
+  // 15-second heartbeat ping to stop Cloudflare timeouts
+  const heartbeatInterval = setInterval(() => {
+    try {
+      res.write(': ping\n\n');
+    } catch (e) {
+      clearInterval(heartbeatInterval);
+    }
+  }, 15000);
+
   transport.onclose = () => {
-    console.log(`SSE closed: ${transport.sessionId}`);
+    console.log(`[SSE] Connection closed: ${transport.sessionId}`);
+    clearInterval(heartbeatInterval);
     transports.delete(transport.sessionId);
   };
 
   await server.connect(transport);
+  res.write(': ' + ' '.repeat(2048) + '\n\n');
 };
 
 app.get('/sse', handleSse);
@@ -249,19 +256,14 @@ app.post('/messages', async (req, res) => {
   const transport = transports.get(sessionId);
 
   if (!transport) {
-    console.error(`Session not found: ${sessionId}`);
+    console.error(`[POST /messages] Session not found: ${sessionId}`);
     return res.status(404).send('Session not found');
   }
 
   await transport.handlePostMessage(req, res, req.body);
 });
 
-const PORT = process.env.PORT || 3000;
-
-if (!process.env.VERCEL) {
-  app.listen(PORT, () => {
-    console.log(`RasoiOS MCP Rails Server live on port ${PORT}`);
-  });
-}
-
-export default app;
+const PORT = 3000;
+app.listen(PORT, () => {
+  console.log(`RasoiOS MCP Rails Server live on port ${PORT}`);
+});
