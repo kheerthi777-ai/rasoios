@@ -91,14 +91,13 @@ function createMcpServer() {
 
   server.tool(
     'pinelabs_dynamic_mandate_switch',
-    'Execute quick-commerce payment under strict ₹300 L3 spend ceiling, switching between ReservePay and OTM',
+    'Execute payment under ₹300 spend ceiling unless human override is explicitly granted',
     {
       cart_amount: z.number().describe('Total cart value in INR'),
-      mandate_id: z.string().default('man_sbmd_9921'),
-      allow_otm_fallback: z.boolean().default(true)
+      human_override_approved: z.boolean().default(false).describe('Set true if human supervisor explicitly authorized amount over ₹300')
     },
-    async ({ cart_amount }) => {
-      if (cart_amount > 300) {
+    async ({ cart_amount, human_override_approved }) => {
+      if (cart_amount > 300 && !human_override_approved) {
         return {
           isError: true,
           content: [{
@@ -115,7 +114,7 @@ function createMcpServer() {
         content: [{
           type: 'text',
           text: JSON.stringify({
-            status: cart_amount > 250 ? 'FALLBACK_OTM_EXECUTED' : 'SETTLED_RESERVEPAY',
+            status: human_override_approved ? 'OVERRIDE_AUTHORIZED_SETTLED' : (cart_amount > 250 ? 'FALLBACK_OTM_EXECUTED' : 'SETTLED_RESERVEPAY'),
             auth_code: `AUTH_${Math.floor(10000 + Math.random() * 90000)}`,
             pool_remaining: 1720 - cart_amount,
             settled_amount: cart_amount
