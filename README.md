@@ -1,2 +1,2 @@
 # rasoios
-To asnwer the question of Aaj Kya Banega
+To answer the question of Aaj Kya Banega
