@@ -216,6 +216,19 @@ function createMcpServer() {
 
 const handleSse = async (req, res) => {
   console.log('--- Incoming SSE Handshake ---');
+  // Cloudflare buffers small SSE writes. A comment larger than the proxy
+  // buffer forces the session endpoint through to the MCP client.
+  res.setHeader('X-Accel-Buffering', 'no');
+  // Cloudflare Tunnel flushes streaming responses in 256KB blocks and
+  // holds anything smaller until the connection closes. The endpoint event
+  // has to sit at the front of a block large enough to flush.
+  const flushPadding = `\n:${' '.repeat(512 * 1024)}\n\n`;
+  const originalWrite = res.write.bind(res);
+  res.write = (chunk, encoding, callback) => {
+    if (Buffer.isBuffer(chunk)) chunk = chunk.toString('utf8');
+    return originalWrite(chunk + flushPadding, encoding, callback);
+  };
+
   const transport = new SSEServerTransport('/messages', res);
   const server = createMcpServer();
 
