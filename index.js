@@ -8,6 +8,11 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+app.use((req, res, next) => {
+  console.log(`[${req.method}] ${req.url}`);
+  next();
+});
+
 const transports = new Map();
 
 function createMcpServer() {
@@ -16,19 +21,13 @@ function createMcpServer() {
     version: '1.0.0'
   });
 
-  // ==========================================
-  // P0: GNANI VOICE RAILS
-  // ==========================================
   server.tool(
     'gnani_speech_to_text',
     'Transcribe incoming user or cook voice notes into text with emotional context tagging',
     {
-      audio_url: z.string().optional().describe('URL or path to incoming audio file'),
-      audio_base64: z.string().optional().describe('Base64 encoded raw audio string'),
-      scenario_preset: z
-        .enum(['tired_user', 'cook_ready', 'budget_halt_override', 'neutral'])
-        .optional()
-        .describe('Preset scenario for hackathon evaluation testing')
+      audio_url: z.string().optional(),
+      audio_base64: z.string().optional(),
+      scenario_preset: z.enum(['tired_user', 'cook_ready', 'budget_halt_override', 'neutral']).optional()
     },
     async ({ scenario_preset }) => {
       const presets = {
@@ -57,20 +56,8 @@ function createMcpServer() {
           confidence: 0.95
         }
       };
-
-      const result = presets[scenario_preset || 'tired_user'];
-
       return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify({
-              status: 'SUCCESS',
-              service: 'Gnani Prisma STT',
-              ...result
-            }, null, 2)
-          }
-        ]
+        content: [{ type: 'text', text: JSON.stringify({ status: 'SUCCESS', service: 'Gnani Prisma STT', ...(presets[scenario_preset || 'tired_user']) }, null, 2) }]
       };
     }
   );
@@ -85,27 +72,22 @@ function createMcpServer() {
     },
     async ({ text, target_language, speaker_gender }) => {
       return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify({
-              status: 'SUCCESS',
-              service: 'Gnani Timbre TTS',
-              audio_url: `https://rasoios.vercel.app/audio/cook_note_${Date.now()}.mp3`,
-              synthesized_text: text,
-              target_language,
-              speaker_gender,
-              duration_seconds: 14.5
-            }, null, 2)
-          }
-        ]
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            status: 'SUCCESS',
+            service: 'Gnani Timbre TTS',
+            audio_url: `https://rasoios.vercel.app/audio/cook_note_${Date.now()}.mp3`,
+            synthesized_text: text,
+            target_language,
+            speaker_gender,
+            duration_seconds: 14.5
+          }, null, 2)
+        }]
       };
     }
   );
 
-  // ==========================================
-  // P1: PINE LABS GOVERNANCE & MANDATES
-  // ==========================================
   server.tool(
     'pinelabs_dynamic_mandate_switch',
     'Execute quick-commerce payment under strict ₹300 L3 spend ceiling, switching between ReservePay and OTM',
@@ -115,53 +97,29 @@ function createMcpServer() {
       allow_otm_fallback: z.boolean().default(true)
     },
     async ({ cart_amount }) => {
-      // Hard L3 Boundary: ₹300 spend ceiling
       if (cart_amount > 300) {
         return {
           isError: true,
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({
-                status: 'DECLINED',
-                error_code: 'GRANTEX_CAP_BREACH',
-                message: `Cart amount ₹${cart_amount} exceeds ₹300 ceiling. Agent halted for human authorization.`
-              }, null, 2)
-            }
-          ]
-        };
-      }
-
-      if (cart_amount > 250) {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({
-                status: 'FALLBACK_OTM_EXECUTED',
-                auth_code: `OTM_AUTH_${Math.floor(10000 + Math.random() * 90000)}`,
-                pool_remaining: 0,
-                fallback_triggered: true,
-                settled_amount: cart_amount
-              }, null, 2)
-            }
-          ]
-        };
-      }
-
-      return {
-        content: [
-          {
+          content: [{
             type: 'text',
             text: JSON.stringify({
-              status: 'SETTLED_RESERVEPAY',
-              auth_code: `SBMD_AUTH_${Math.floor(10000 + Math.random() * 90000)}`,
-              pool_remaining: 1720 - cart_amount,
-              fallback_triggered: false,
-              settled_amount: cart_amount
+              status: 'DECLINED',
+              error_code: 'GRANTEX_CAP_BREACH',
+              message: `Cart amount ₹${cart_amount} exceeds ₹300 ceiling. Agent halted for human authorization.`
             }, null, 2)
-          }
-        ]
+          }]
+        };
+      }
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            status: cart_amount > 250 ? 'FALLBACK_OTM_EXECUTED' : 'SETTLED_RESERVEPAY',
+            auth_code: `AUTH_${Math.floor(10000 + Math.random() * 90000)}`,
+            pool_remaining: 1720 - cart_amount,
+            settled_amount: cart_amount
+          }, null, 2)
+        }]
       };
     }
   );
@@ -169,49 +127,38 @@ function createMcpServer() {
   server.tool(
     'pinelabs_check_balance',
     'Query rolling weekly balance and active mandate constraints',
-    {
-      user_id: z.string().default('usr_kheerthi_01')
-    },
+    { user_id: z.string().default('usr_kheerthi_01') },
     async ({ user_id }) => {
       return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify({
-              user_id,
-              active_mandate: 'man_sbmd_9921',
-              max_single_tx_ceiling: 300,
-              reservepay_pool_balance: 1580,
-              is_active: true
-            }, null, 2)
-          }
-        ]
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            user_id,
+            active_mandate: 'man_sbmd_9921',
+            max_single_tx_ceiling: 300,
+            reservepay_pool_balance: 1580,
+            is_active: true
+          }, null, 2)
+        }]
       };
     }
   );
 
-  // ==========================================
-  // P2: DELHIVERY LOGISTICS & NAVIGATION
-  // ==========================================
   server.tool(
     'delhivery_verify_address',
     'Verify drop address granularity and geocode coordinates',
-    {
-      address: z.string().describe('Delivery address')
-    },
-    async ({ address }) => {
+    { address: z.string() },
+    async () => {
       return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify({
-              is_verified: true,
-              granularity: 'PREMISE',
-              standardised_address: 'Flat 402, Sea Breeze Apartments, Palm Beach Rd, Sanpada, Navi Mumbai, Maharashtra 400705',
-              coordinates: { lat: 19.0657, lng: 73.0104 }
-            }, null, 2)
-          }
-        ]
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            is_verified: true,
+            granularity: 'PREMISE',
+            standardised_address: 'Flat 402, Sea Breeze Apartments, Palm Beach Rd, Sanpada, Navi Mumbai, Maharashtra 400705',
+            coordinates: { lat: 19.0657, lng: 73.0104 }
+          }, null, 2)
+        }]
       };
     }
   );
@@ -220,23 +167,21 @@ function createMcpServer() {
     'delhivery_hyperlocal_dispatch',
     'Dispatch missing grocery items from dark store',
     {
-      sku_list: z.array(z.string()).describe('List of missing items to order'),
+      sku_list: z.array(z.string()),
       target_sla_mins: z.number().default(30)
     },
     async ({ sku_list, target_sla_mins }) => {
       return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify({
-              order_id: `DLH_HYPER_${Math.floor(1000 + Math.random() * 9000)}`,
-              darkstore_id: 'DS_WEST_SANPADA',
-              eta_minutes: Math.min(target_sla_mins, 22),
-              status: 'DISPATCHED',
-              items_reserved: sku_list
-            }, null, 2)
-          }
-        ]
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            order_id: `DLH_HYPER_${Math.floor(1000 + Math.random() * 9000)}`,
+            darkstore_id: 'DS_WEST_SANPADA',
+            eta_minutes: Math.min(target_sla_mins, 22),
+            status: 'DISPATCHED',
+            items_reserved: sku_list
+          }, null, 2)
+        }]
       };
     }
   );
@@ -245,25 +190,23 @@ function createMcpServer() {
     'delhivery_premise_navigation',
     'Generate silent doorstep delivery instructions for rider gate clearance',
     {
-      order_id: z.string().describe('Delhivery Order ID'),
+      order_id: z.string(),
       drop_type: z.string().default('DOORSTEP_SECURITY_BOX'),
       gate_code: z.string().default('WING_B_77')
     },
     async ({ order_id, drop_type, gate_code }) => {
       return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify({
-              instruction_token: `INST_NAV_${Date.now()}`,
-              order_id,
-              delivery_protocol: drop_type,
-              gate_code,
-              requires_call: false,
-              silent_drop_authorized: true
-            }, null, 2)
-          }
-        ]
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            instruction_token: `INST_NAV_${Date.now()}`,
+            order_id,
+            delivery_protocol: drop_type,
+            gate_code,
+            requires_call: false,
+            silent_drop_authorized: true
+          }, null, 2)
+        }]
       };
     }
   );
@@ -271,39 +214,14 @@ function createMcpServer() {
   return server;
 }
 
-// Root Status
-app.get('/', (req, res) => {
-  res.json({
-    status: 'online',
-    service: 'RasoiOS MCP Rails Server',
-    protocols: ['MCP/SSE'],
-    tools: [
-      'gnani_speech_to_text',
-      'gnani_text_to_speech',
-      'pinelabs_dynamic_mandate_switch',
-      'pinelabs_check_balance',
-      'delhivery_verify_address',
-      'delhivery_hyperlocal_dispatch',
-      'delhivery_premise_navigation'
-    ]
-  });
-});
-
-// Add simple request logger to verify pings in real-time
-app.use((req, res, next) => {
-  console.log(`[${req.method}] ${req.url}`);
-  next();
-});
-
-// SSE Handler - Mount on both /sse and / to handle any URL format
 const handleSse = async (req, res) => {
-  console.log('--- Incoming SSE Connection ---');
+  console.log('--- Incoming SSE Handshake ---');
   const transport = new SSEServerTransport('/messages', res);
   const server = createMcpServer();
 
   transports.set(transport.sessionId, transport);
   transport.onclose = () => {
-    console.log(`SSE connection closed: ${transport.sessionId}`);
+    console.log(`SSE closed: ${transport.sessionId}`);
     transports.delete(transport.sessionId);
   };
 
@@ -313,7 +231,6 @@ const handleSse = async (req, res) => {
 app.get('/sse', handleSse);
 app.get('/', handleSse);
 
-// Post Messages Handler - CRITICAL: req.body MUST be passed as 3rd argument
 app.post('/messages', async (req, res) => {
   const sessionId = req.query.sessionId;
   const transport = transports.get(sessionId);
@@ -323,12 +240,15 @@ app.post('/messages', async (req, res) => {
     return res.status(404).send('Session not found');
   }
 
-  // Passing req.body prevents the stream hang
   await transport.handlePostMessage(req, res, req.body);
 });
 
-const PORT = 3000;
-app.listen(PORT, () => {
-  console.log(`RasoiOS MCP Rails Server live on port ${PORT}`);
-});
+const PORT = process.env.PORT || 3000;
 
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`RasoiOS MCP Rails Server live on port ${PORT}`);
+  });
+}
+
+export default app;
