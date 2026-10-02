@@ -289,38 +289,46 @@ app.get('/', (req, res) => {
   });
 });
 
-// SSE Transport Handler
-app.get('/sse', async (req, res) => {
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache, no-transform');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no');
-  res.flushHeaders?.();
+// Add simple request logger to verify pings in real-time
+app.use((req, res, next) => {
+  console.log(`[${req.method}] ${req.url}`);
+  next();
+});
 
+// SSE Handler - Mount on both /sse and / to handle any URL format
+const handleSse = async (req, res) => {
+  console.log('--- Incoming SSE Connection ---');
   const transport = new SSEServerTransport('/messages', res);
   const server = createMcpServer();
 
   transports.set(transport.sessionId, transport);
-  transport.onclose = () => transports.delete(transport.sessionId);
+  transport.onclose = () => {
+    console.log(`SSE connection closed: ${transport.sessionId}`);
+    transports.delete(transport.sessionId);
+  };
 
   await server.connect(transport);
-});
+};
 
-// Post Messages Handler
+app.get('/sse', handleSse);
+app.get('/', handleSse);
+
+// Post Messages Handler - CRITICAL: req.body MUST be passed as 3rd argument
 app.post('/messages', async (req, res) => {
   const sessionId = req.query.sessionId;
   const transport = transports.get(sessionId);
 
   if (!transport) {
+    console.error(`Session not found: ${sessionId}`);
     return res.status(404).send('Session not found');
   }
 
-  await transport.handlePostMessage(req, res);
+  // Passing req.body prevents the stream hang
+  await transport.handlePostMessage(req, res, req.body);
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = 3000;
 app.listen(PORT, () => {
-  console.log(`MCP Rails server listening on port ${PORT}`);
+  console.log(`RasoiOS MCP Rails Server live on port ${PORT}`);
 });
 
-export default app;
