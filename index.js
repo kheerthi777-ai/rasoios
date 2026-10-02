@@ -284,6 +284,10 @@ const handleSse = async (req, res) => {
   res.write(': ' + ' '.repeat(2048) + '\n\n');
 };
 
+app.get('/health', (req, res) => {
+  res.status(200).send('OK');
+});
+
 app.get('/sse', handleSse);
 app.get('/', handleSse);
 
@@ -321,8 +325,4 @@ app.post('/messages', async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`RasoiOS MCP Rails Server live on port ${PORT}`);
-});
-
-app.get('/health', (req, res) => {
-  res.status(200).send('OK');
 });
