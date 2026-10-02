@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
 
 const app = express();
@@ -224,14 +225,6 @@ const handleSse = async (req, res) => {
   const proto = req.headers['x-forwarded-proto'] || req.protocol;
   const endpoint = `${proto}://${host}/messages`;
 
-  // Cloudflare Tunnel only forwards a streaming body after 256KB.
-  const flushPadding = `\n:${' '.repeat(512 * 1024)}\n\n`;
-  const originalWrite = res.write.bind(res);
-  res.write = (chunk, encoding, callback) => {
-    if (Buffer.isBuffer(chunk)) chunk = chunk.toString('utf8');
-    return originalWrite(String(chunk) + flushPadding, encoding, callback);
-  };
-
   const transport = new SSEServerTransport(endpoint, res);
   const server = createMcpServer();
 
@@ -258,6 +251,25 @@ const handleSse = async (req, res) => {
 
 app.get('/sse', handleSse);
 app.get('/', handleSse);
+
+async function handleMcpPost(req, res) {
+  console.log(`[MCP] ${req.method} ${req.url}`);
+  const server = createMcpServer();
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+    enableJsonResponse: true
+  });
+  res.on('close', () => {
+    transport.close().catch(() => {});
+    server.close().catch(() => {});
+  });
+  await server.connect(transport);
+  await transport.handleRequest(req, res, req.body);
+}
+
+app.post('/sse', handleMcpPost);
+app.post('/', handleMcpPost);
+app.post('/mcp', handleMcpPost);
 
 app.post('/messages', async (req, res) => {
   const sessionId = req.query.sessionId;
