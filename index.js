@@ -1,15 +1,326 @@
-{
-  "name": "rasoios-mcp-rails",
-  "version": "1.0.0",
-  "type": "module",
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.6.1",
-    "cors": "^2.8.5",
-    "express": "^4.19.2",
-    "zod": "^3.23.8"
-  }
+import express from 'express';
+import cors from 'cors';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { z } from 'zod';
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+const transports = new Map();
+
+function createMcpServer() {
+  const server = new McpServer({
+    name: 'rasoios-mcp-rails',
+    version: '1.0.0'
+  });
+
+  // ==========================================
+  // P0: GNANI VOICE RAILS
+  // ==========================================
+  server.tool(
+    'gnani_speech_to_text',
+    'Transcribe incoming user or cook voice notes into text with emotional context tagging',
+    {
+      audio_url: z.string().optional().describe('URL or path to incoming audio file'),
+      audio_base64: z.string().optional().describe('Base64 encoded raw audio string'),
+      scenario_preset: z
+        .enum(['tired_user', 'cook_ready', 'budget_halt_override', 'neutral'])
+        .optional()
+        .describe('Preset scenario for hackathon evaluation testing')
+    },
+    async ({ scenario_preset }) => {
+      const presets = {
+        tired_user: {
+          transcript: 'Yaar aaj office me bohot thak gaya hoon, bas khichdi aur dahi khana hai, kuch halka bana do.',
+          detected_language: 'hi-IN (Hinglish)',
+          sentiment: 'exhausted',
+          confidence: 0.96
+        },
+        cook_ready: {
+          transcript: 'Bhaiya main 7 baje aa rahi hoon, daal bhigo dijiye.',
+          detected_language: 'hi-IN',
+          sentiment: 'operational',
+          confidence: 0.98
+        },
+        budget_halt_override: {
+          transcript: 'Haan add kar do dry fruits bhi, extra 150 chalega.',
+          detected_language: 'hi-IN',
+          sentiment: 'approval',
+          confidence: 0.94
+        },
+        neutral: {
+          transcript: 'Pantry check karo aur dinner plan batao.',
+          detected_language: 'hi-IN',
+          sentiment: 'neutral',
+          confidence: 0.95
+        }
+      };
+
+      const result = presets[scenario_preset || 'tired_user'];
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              status: 'SUCCESS',
+              service: 'Gnani Prisma STT',
+              ...result
+            }, null, 2)
+          }
+        ]
+      };
+    }
+  );
+
+  server.tool(
+    'gnani_text_to_speech',
+    'Synthesize regional voice notes (Hindi/Marathi) with morning prep instructions for the cook',
+    {
+      text: z.string().describe('Instructions to synthesize into regional audio'),
+      target_language: z.enum(['hi-IN', 'en-IN', 'mr-IN']).default('hi-IN'),
+      speaker_gender: z.enum(['female', 'male']).default('female')
+    },
+    async ({ text, target_language, speaker_gender }) => {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              status: 'SUCCESS',
+              service: 'Gnani Timbre TTS',
+              audio_url: `https://rasoios.vercel.app/audio/cook_note_${Date.now()}.mp3`,
+              synthesized_text: text,
+              target_language,
+              speaker_gender,
+              duration_seconds: 14.5
+            }, null, 2)
+          }
+        ]
+      };
+    }
+  );
+
+  // ==========================================
+  // P1: PINE LABS GOVERNANCE & MANDATES
+  // ==========================================
+  server.tool(
+    'pinelabs_dynamic_mandate_switch',
+    'Execute quick-commerce payment under strict ₹300 L3 spend ceiling, switching between ReservePay and OTM',
+    {
+      cart_amount: z.number().describe('Total cart value in INR'),
+      mandate_id: z.string().default('man_sbmd_9921'),
+      allow_otm_fallback: z.boolean().default(true)
+    },
+    async ({ cart_amount }) => {
+      // Hard L3 Boundary: ₹300 spend ceiling
+      if (cart_amount > 300) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                status: 'DECLINED',
+                error_code: 'GRANTEX_CAP_BREACH',
+                message: `Cart amount ₹${cart_amount} exceeds ₹300 ceiling. Agent halted for human authorization.`
+              }, null, 2)
+            }
+          ]
+        };
+      }
+
+      if (cart_amount > 250) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                status: 'FALLBACK_OTM_EXECUTED',
+                auth_code: `OTM_AUTH_${Math.floor(10000 + Math.random() * 90000)}`,
+                pool_remaining: 0,
+                fallback_triggered: true,
+                settled_amount: cart_amount
+              }, null, 2)
+            }
+          ]
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              status: 'SETTLED_RESERVEPAY',
+              auth_code: `SBMD_AUTH_${Math.floor(10000 + Math.random() * 90000)}`,
+              pool_remaining: 1720 - cart_amount,
+              fallback_triggered: false,
+              settled_amount: cart_amount
+            }, null, 2)
+          }
+        ]
+      };
+    }
+  );
+
+  server.tool(
+    'pinelabs_check_balance',
+    'Query rolling weekly balance and active mandate constraints',
+    {
+      user_id: z.string().default('usr_kheerthi_01')
+    },
+    async ({ user_id }) => {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              user_id,
+              active_mandate: 'man_sbmd_9921',
+              max_single_tx_ceiling: 300,
+              reservepay_pool_balance: 1580,
+              is_active: true
+            }, null, 2)
+          }
+        ]
+      };
+    }
+  );
+
+  // ==========================================
+  // P2: DELHIVERY LOGISTICS & NAVIGATION
+  // ==========================================
+  server.tool(
+    'delhivery_verify_address',
+    'Verify drop address granularity and geocode coordinates',
+    {
+      address: z.string().describe('Delivery address')
+    },
+    async ({ address }) => {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              is_verified: true,
+              granularity: 'PREMISE',
+              standardised_address: 'Flat 402, Sea Breeze Apartments, Palm Beach Rd, Sanpada, Navi Mumbai, Maharashtra 400705',
+              coordinates: { lat: 19.0657, lng: 73.0104 }
+            }, null, 2)
+          }
+        ]
+      };
+    }
+  );
+
+  server.tool(
+    'delhivery_hyperlocal_dispatch',
+    'Dispatch missing grocery items from dark store',
+    {
+      sku_list: z.array(z.string()).describe('List of missing items to order'),
+      target_sla_mins: z.number().default(30)
+    },
+    async ({ sku_list, target_sla_mins }) => {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              order_id: `DLH_HYPER_${Math.floor(1000 + Math.random() * 9000)}`,
+              darkstore_id: 'DS_WEST_SANPADA',
+              eta_minutes: Math.min(target_sla_mins, 22),
+              status: 'DISPATCHED',
+              items_reserved: sku_list
+            }, null, 2)
+          }
+        ]
+      };
+    }
+  );
+
+  server.tool(
+    'delhivery_premise_navigation',
+    'Generate silent doorstep delivery instructions for rider gate clearance',
+    {
+      order_id: z.string().describe('Delhivery Order ID'),
+      drop_type: z.string().default('DOORSTEP_SECURITY_BOX'),
+      gate_code: z.string().default('WING_B_77')
+    },
+    async ({ order_id, drop_type, gate_code }) => {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              instruction_token: `INST_NAV_${Date.now()}`,
+              order_id,
+              delivery_protocol: drop_type,
+              gate_code,
+              requires_call: false,
+              silent_drop_authorized: true
+            }, null, 2)
+          }
+        ]
+      };
+    }
+  );
+
+  return server;
 }
+
+// Root Status
+app.get('/', (req, res) => {
+  res.json({
+    status: 'online',
+    service: 'RasoiOS MCP Rails Server',
+    protocols: ['MCP/SSE'],
+    tools: [
+      'gnani_speech_to_text',
+      'gnani_text_to_speech',
+      'pinelabs_dynamic_mandate_switch',
+      'pinelabs_check_balance',
+      'delhivery_verify_address',
+      'delhivery_hyperlocal_dispatch',
+      'delhivery_premise_navigation'
+    ]
+  });
+});
+
+// SSE Transport Handler
+app.get('/sse', async (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+
+  const transport = new SSEServerTransport('/messages', res);
+  const server = createMcpServer();
+
+  transports.set(transport.sessionId, transport);
+  transport.onclose = () => transports.delete(transport.sessionId);
+
+  await server.connect(transport);
+});
+
+// Post Messages Handler
+app.post('/messages', async (req, res) => {
+  const sessionId = req.query.sessionId;
+  const transport = transports.get(sessionId);
+
+  if (!transport) {
+    return res.status(404).send('Session not found');
+  }
+
+  await transport.handlePostMessage(req, res);
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`MCP Rails server listening on port ${PORT}`);
+});
+
+export default app;
