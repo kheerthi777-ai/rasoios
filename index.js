@@ -224,6 +224,14 @@ const handleSse = async (req, res) => {
   const proto = req.headers['x-forwarded-proto'] || req.protocol;
   const endpoint = `${proto}://${host}/messages`;
 
+  // Cloudflare Tunnel only forwards a streaming body after 256KB.
+  const flushPadding = `\n:${' '.repeat(512 * 1024)}\n\n`;
+  const originalWrite = res.write.bind(res);
+  res.write = (chunk, encoding, callback) => {
+    if (Buffer.isBuffer(chunk)) chunk = chunk.toString('utf8');
+    return originalWrite(String(chunk) + flushPadding, encoding, callback);
+  };
+
   const transport = new SSEServerTransport(endpoint, res);
   const server = createMcpServer();
 
