@@ -1,8 +1,8 @@
 import pg from 'pg';
-import { OpenAI } from 'openai';
+import { GoogleGenAI } from '@google/genai';
 import 'dotenv/config';
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 
 const sampleProfiles = [
@@ -25,15 +25,18 @@ const sampleProfiles = [
 ];
 
 async function seed() {
-  console.log('Generating embeddings and seeding taste profiles...');
+  console.log('Generating Gemini embeddings...');
 
   for (const item of sampleProfiles) {
-    const res = await openai.embeddings.create({
-      model: 'text-embedding-3-small',
-      input: item.preference
+    const response = await ai.models.embedContent({
+      model: 'gemini-embedding-001',
+      contents: item.preference,
+      config: {
+        outputDimensionality: 768
+      }
     });
 
-    const vector = JSON.stringify(res.data[0].embedding);
+    const vector = JSON.stringify(response.embedding.values);
 
     await pool.query(
       `INSERT INTO taste_profiles (category, preference, embedding) VALUES ($1, $2, $3::vector)`,
