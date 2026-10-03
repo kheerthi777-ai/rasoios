@@ -207,10 +207,7 @@ function createMcpServer() {
       const clean = (value, allowed) => {
         if (value == null) return undefined;
         const normalized = String(value).trim().toLowerCase();
-        if (!normalized || normalized === 'all' || normalized === 'any' || normalized === 'none') return undefined;
-        if (!allowed.has(normalized)) {
-          throw new Error(`Use one of: ${[...allowed].join(', ')}`);
-        }
+        if (!allowed.has(normalized)) return undefined;
         return normalized;
       };
       console.log(`[TOOL CALL] fridge_snapshot location=${location || 'all'} form=${form || 'all'}`);
