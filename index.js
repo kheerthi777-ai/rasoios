@@ -59,6 +59,49 @@ function whatsappRecipient(phone) {
   return digits;
 }
 
+function twilioWhatsappAddress(phone) {
+  const digits = String(phone).replace(/^whatsapp:/i, '').replace(/\D/g, '');
+  if (digits.length < 10) {
+    throw new Error('Phone number needs a country code, for example whatsapp:+919876543210');
+  }
+  return `whatsapp:+${digits}`;
+}
+
+async function sendTwilioWhatsapp({ recipient_phone, message_body }) {
+  const accountSid = process.env.TWILIO_ACCOUNT_SID;
+  const authToken = process.env.TWILIO_AUTH_TOKEN;
+  const from = process.env.TWILIO_WHATSAPP_FROM;
+  if (!accountSid || !authToken || !from) {
+    throw new Error('TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_WHATSAPP_FROM are not set');
+  }
+  const to = twilioWhatsappAddress(recipient_phone);
+  const response = await fetch(
+    `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Basic ${Buffer.from(`${accountSid}:${authToken}`).toString('base64')}`,
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: new URLSearchParams({
+        From: from.startsWith('whatsapp:') ? from : `whatsapp:${from}`,
+        To: to,
+        Body: message_body
+      })
+    }
+  );
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload?.message || `Twilio request failed with ${response.status}`);
+  }
+  return {
+    status: payload.status || 'queued',
+    provider: 'twilio_whatsapp',
+    message_sid: payload.sid,
+    recipient: to
+  };
+}
+
 function createMcpServer() {
   const server = new McpServer({
     name: 'rasoios-pantry-mcp',
@@ -453,21 +496,26 @@ function createMcpServer() {
     },
     async ({ recipient_phone, message_body, message_type }) => {
       console.log(`[WHATSAPP DISPATCH] To: ${recipient_phone} | Type: ${message_type}`);
-      console.log(`[WHATSAPP BODY]\n${message_body}`);
-
-      return {
-        content: [{
-          type: 'text',
-          text: JSON.stringify({
-            status: 'SENT',
-            provider: 'twilio_whatsapp',
-            message_sid: `SM${Date.now()}`,
-            recipient: recipient_phone,
-            message_type,
-            timestamp: new Date().toISOString()
-          }, null, 2)
-        }]
-      };
+      try {
+        const receipt = await sendTwilioWhatsapp({ recipient_phone, message_body });
+        console.log(`[WHATSAPP SENT] sid=${receipt.message_sid} to=${receipt.recipient} status=${receipt.status}`);
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              ...receipt,
+              message_type,
+              timestamp: new Date().toISOString()
+            }, null, 2)
+          }]
+        };
+      } catch (err) {
+        console.error('[TOOL ERROR] dispatch_whatsapp_message failed:', err);
+        return {
+          content: [{ type: 'text', text: `WhatsApp dispatch failed: ${err.message}` }],
+          isError: true
+        };
+      }
     }
   );
 
