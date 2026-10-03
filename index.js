@@ -196,10 +196,10 @@ function createMcpServer() {
     'fridge_snapshot',
     'Return the household stock book, optionally filtered by storage location or item form',
     {
-      location: z.string().optional()
-        .describe('fridge, freezer, pantry, masala_dabba, or counter. Omit, blank, or "all" for the full household.'),
-      form: z.string().optional()
-        .describe('raw, packet, dabba, chutney, leftover, batter, opened, or hardware. Omit, blank, or "all" for every form.')
+      location: z.union([z.string(), z.null()]).optional()
+        .describe('fridge, freezer, pantry, masala_dabba, or counter. Null, blank, or "all" returns the full household.'),
+      form: z.union([z.string(), z.null()]).optional()
+        .describe('raw, packet, dabba, chutney, leftover, batter, opened, or hardware. Null, blank, or "all" returns every form.')
     },
     async ({ location, form }) => {
       const locations = new Set(['fridge', 'freezer', 'pantry', 'masala_dabba', 'counter']);
