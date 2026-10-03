@@ -519,6 +519,56 @@ function createMcpServer() {
     }
   );
 
+  server.tool(
+    'send_telegram_notification',
+    'Sends real-time prep instructions, missing grocery alerts, or approval cards to the user via Telegram',
+    {
+      message_text: z.string().describe('Custom message content to send (supports Markdown)'),
+      chat_id: z.string().optional().describe('Telegram chat ID of the user')
+    },
+    async ({ message_text, chat_id }) => {
+      const targetChatId = chat_id || process.env.TELEGRAM_CHAT_ID;
+      const botToken = process.env.TELEGRAM_BOT_TOKEN;
+      console.log(`[TELEGRAM DISPATCH] Sending to chat_id: ${targetChatId}`);
+      try {
+        if (!botToken || !targetChatId) {
+          throw new Error('TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are not set');
+        }
+        const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: targetChatId,
+            text: message_text,
+            parse_mode: 'Markdown'
+          })
+        });
+        const result = await response.json();
+        if (!result.ok) {
+          throw new Error(result.description || 'Telegram API error');
+        }
+        console.log(`[TELEGRAM SUCCESS] Message sent. ID: ${result.result.message_id}`);
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              status: 'DELIVERED',
+              provider: 'telegram',
+              message_id: result.result.message_id,
+              timestamp: new Date().toISOString()
+            }, null, 2)
+          }]
+        };
+      } catch (err) {
+        console.error('[TELEGRAM ERROR]', err);
+        return {
+          content: [{ type: 'text', text: `Telegram delivery failed: ${err.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+
   return server;
 }
 
