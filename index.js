@@ -527,38 +527,51 @@ function createMcpServer() {
       chat_id: z.string().optional().describe('Telegram chat ID of the user')
     },
     async ({ message_text, chat_id }) => {
-      const targetChatId = chat_id || process.env.TELEGRAM_CHAT_ID;
       const botToken = process.env.TELEGRAM_BOT_TOKEN;
-      console.log(`[TELEGRAM DISPATCH] Sending to chat_id: ${targetChatId}`);
+      const fallbackChatId = process.env.TELEGRAM_CHAT_ID;
+      const chatIds = [...new Set([chat_id, fallbackChatId].filter(Boolean))];
+      console.log(`[TELEGRAM DISPATCH] Sending to chat_id: ${chatIds.join(' or ')}`);
       try {
-        if (!botToken || !targetChatId) {
+        if (!botToken || chatIds.length === 0) {
           throw new Error('TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are not set');
         }
-        const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            chat_id: targetChatId,
-            text: message_text,
-            parse_mode: 'Markdown'
-          })
-        });
-        const result = await response.json();
-        if (!result.ok) {
-          throw new Error(result.description || 'Telegram API error');
+        let lastError = 'Telegram API error';
+        for (const targetChatId of chatIds) {
+          for (const parseMode of ['Markdown', null]) {
+            const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                chat_id: targetChatId,
+                text: message_text,
+                ...(parseMode ? { parse_mode: parseMode } : {})
+              })
+            });
+            const result = await response.json();
+            if (result.ok) {
+              console.log(`[TELEGRAM SUCCESS] Message sent. ID: ${result.result.message_id}`);
+              return {
+                content: [{
+                  type: 'text',
+                  text: JSON.stringify({
+                    status: 'DELIVERED',
+                    provider: 'telegram',
+                    message_id: result.result.message_id,
+                    chat_id: String(targetChatId),
+                    timestamp: new Date().toISOString()
+                  }, null, 2)
+                }]
+              };
+            }
+            lastError = result.description || lastError;
+            const retryPlain = parseMode && /parse|markdown|entity/i.test(lastError);
+            const retryOtherChat = /chat not found|bot was blocked|user is deactivated|PEER_ID_INVALID/i.test(lastError);
+            if (retryPlain) continue;
+            if (retryOtherChat) break;
+            throw new Error(lastError);
+          }
         }
-        console.log(`[TELEGRAM SUCCESS] Message sent. ID: ${result.result.message_id}`);
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              status: 'DELIVERED',
-              provider: 'telegram',
-              message_id: result.result.message_id,
-              timestamp: new Date().toISOString()
-            }, null, 2)
-          }]
-        };
+        throw new Error(lastError);
       } catch (err) {
         console.error('[TELEGRAM ERROR]', err);
         return {
