@@ -59,6 +59,100 @@ function whatsappRecipient(phone) {
   return digits;
 }
 
+function toBaseQuantity(quantity, unit) {
+  const u = String(unit || '').toLowerCase();
+  const amount = Number(quantity);
+  if (u === 'kg') return { amount: amount * 1000, unit: 'g' };
+  if (u === 'g') return { amount, unit: 'g' };
+  if (u === 'l' || u === 'litre' || u === 'liter') return { amount: amount * 1000, unit: 'ml' };
+  if (u === 'ml') return { amount, unit: 'ml' };
+  return { amount, unit: u };
+}
+
+function stockMatches(row, query) {
+  const needle = query.toLowerCase().trim();
+  const id = row.canonical_id.toLowerCase().replaceAll('_', ' ');
+  const name = row.name.toLowerCase();
+  const hay = `${id} ${name}`;
+  if (id === needle || hay.includes(needle)) return true;
+  const tokens = needle.split(/[^a-z0-9]+/).filter(token => token.length > 2);
+  return tokens.length > 0 && tokens.every(token => hay.includes(token));
+}
+
+function sumUsableStock(rows) {
+  const totals = new Map();
+  for (const row of rows) {
+    if (!row.usable_today) continue;
+    const base = toBaseQuantity(row.quantity, row.unit);
+    const current = totals.get(row.canonical_id) || { amount: 0, unit: base.unit, name: row.name };
+    if (current.unit === base.unit) current.amount += base.amount;
+    totals.set(row.canonical_id, current);
+  }
+  return totals;
+}
+
+async function scoreProposal({ dish_name, ingredients, required_appliances = [] }) {
+  const { rows } = await pool.query(
+    `SELECT canonical_id, name, quantity, unit, usable_today FROM household_inventory`
+  );
+
+  if (required_appliances.length > 0) {
+    const missingApps = required_appliances.filter(appliance => {
+      return !rows.some(row => row.usable_today && Number(row.quantity) >= 1 && stockMatches(row, appliance));
+    });
+    if (missingApps.length > 0) {
+      return {
+        dish_name,
+        score: 0,
+        allowed: false,
+        hero_missing: false,
+        reason: `Missing required hardware: ${missingApps.join(', ')}`,
+        missing_lines: []
+      };
+    }
+  }
+
+  const missingLines = [];
+  let fulfilled = 0;
+  let heroMissing = false;
+
+  for (const req of ingredients) {
+    const matches = rows.filter(row => stockMatches(row, req.canonical_id));
+    const totals = sumUsableStock(matches);
+    const need = toBaseQuantity(req.required_quantity, req.unit);
+    let onHand = 0;
+    let matched = matches[0]?.canonical_id || null;
+    for (const [canonicalId, total] of totals) {
+      if (total.unit !== need.unit) continue;
+      if (total.amount >= onHand) {
+        onHand = total.amount;
+        matched = canonicalId;
+      }
+    }
+    if (onHand >= need.amount) {
+      fulfilled += 1;
+    } else {
+      missingLines.push({
+        requested: req.canonical_id,
+        matched_canonical_id: matched,
+        deficit: Number((need.amount - onHand).toFixed(3)),
+        unit: need.unit,
+        is_hero: req.is_hero
+      });
+      if (req.is_hero) heroMissing = true;
+    }
+  }
+
+  const scoreRatio = ingredients.length > 0 ? fulfilled / ingredients.length : 1;
+  return {
+    dish_name,
+    score: Math.round(scoreRatio * 100),
+    allowed: scoreRatio >= 0.8 && !heroMissing,
+    hero_missing: heroMissing,
+    missing_lines: missingLines
+  };
+}
+
 function createMcpServer() {
   const server = new McpServer({
     name: 'rasoios-pantry-mcp',
@@ -230,6 +324,39 @@ function createMcpServer() {
         console.error('[TOOL ERROR] fridge_snapshot failed:', err);
         return {
           content: [{ type: 'text', text: `Fridge snapshot failed: ${err.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+
+  server.tool(
+    'score_dish',
+    'Score a dish the agent just proposed against the household stock book. At least 80% of ingredient lines must be on hand, and every hero ingredient must be fully available.',
+    {
+      dish_name: z.string().describe('Dish the agent wants to suggest, e.g. "jeera poha"'),
+      ingredients: z.array(z.object({
+        canonical_id: z.string().describe('Ingredient name or id, e.g. "poha", "paneer", "coriander"'),
+        required_quantity: z.number(),
+        unit: z.string().describe('g, kg, ml, piece'),
+        is_hero: z.boolean().default(true).describe('True when the dish cannot be made without this ingredient')
+      })).min(1),
+      required_appliances: z.array(z.string()).optional().describe('Hardware ids such as idli_stand, tawa, pressure_cooker')
+    },
+    async ({ dish_name, ingredients, required_appliances }) => {
+      console.log(`[TOOL CALL] score_dish ${dish_name} lines=${ingredients.length}`);
+      try {
+        const result = await scoreProposal({
+          dish_name,
+          ingredients,
+          required_appliances: required_appliances || []
+        });
+        console.log(`[TOOL SUCCESS] score_dish ${dish_name} allowed=${result.allowed} score=${result.score}`);
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        console.error('[TOOL ERROR] score_dish failed:', err);
+        return {
+          content: [{ type: 'text', text: `Dish score failed: ${err.message}` }],
           isError: true
         };
       }
