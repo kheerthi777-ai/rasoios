@@ -5,6 +5,7 @@ import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { z } from 'zod';
 import pg from 'pg';
 import { GoogleGenAI } from '@google/genai';
+import { randomUUID } from 'crypto';
 import 'dotenv/config';
 
 const app = express();
@@ -28,6 +29,18 @@ const pool = new pg.Pool({
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY
 });
+
+const audioClips = new Map();
+
+function publicBaseUrl() {
+  return (process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/$/, '');
+}
+
+function gnaniVoice(language, speakerGender) {
+  if (speakerGender === 'male') return 'Deepak';
+  if (language === 'en-IN') return 'Kaveri';
+  return 'Nalini';
+}
 
 function createMcpServer() {
   const server = new McpServer({
@@ -206,10 +219,152 @@ function createMcpServer() {
     }
   );
 
+  server.tool(
+    'gnani_speech_to_text',
+    'Transcribe a cook or planner voice note with Gnani Prisma. Accepts an audio URL or base64 audio up to 60 seconds.',
+    {
+      audio_url: z.string().optional().describe('Public URL of a wav, mp3, ogg, flac, aac, or m4a clip'),
+      audio_base64: z.string().optional().describe('Base64-encoded audio bytes'),
+      language_code: z.enum(['hi-IN', 'en-IN', 'mr-IN', 'hi-en']).default('hi-IN')
+    },
+    async ({ audio_url, audio_base64, language_code }) => {
+      console.log(`[TOOL CALL] gnani_speech_to_text language=${language_code}`);
+      try {
+        if (!process.env.GNANI_STT_API_KEY) {
+          throw new Error('GNANI_STT_API_KEY is not set');
+        }
+        if (!audio_url && !audio_base64) {
+          throw new Error('Provide audio_url or audio_base64');
+        }
+
+        let bytes;
+        let filename = 'note.wav';
+        if (audio_url) {
+          const audioRes = await fetch(audio_url);
+          if (!audioRes.ok) throw new Error(`Audio fetch failed: ${audioRes.status}`);
+          bytes = Buffer.from(await audioRes.arrayBuffer());
+          const pathName = new URL(audio_url).pathname;
+          filename = pathName.split('/').pop() || filename;
+        } else {
+          bytes = Buffer.from(audio_base64, 'base64');
+        }
+
+        const form = new FormData();
+        form.append('audio_file', new Blob([bytes]), filename);
+        form.append('language_code', language_code);
+        form.append('format', 'transcribe');
+
+        const response = await fetch('https://api.vachana.ai/stt/v3', {
+          method: 'POST',
+          headers: { 'X-API-Key-ID': process.env.GNANI_STT_API_KEY },
+          body: form
+        });
+        const bodyText = await response.text();
+        if (!response.ok) {
+          throw new Error(`Gnani STT ${response.status}: ${bodyText.slice(0, 300)}`);
+        }
+        const parsed = JSON.parse(bodyText);
+        console.log(`[TOOL SUCCESS] gnani_speech_to_text request_id=${parsed.request_id || 'none'}`);
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              transcript: parsed.transcript,
+              request_id: parsed.request_id,
+              language_code
+            }, null, 2)
+          }]
+        };
+      } catch (err) {
+        console.error('[TOOL ERROR] gnani_speech_to_text failed:', err);
+        return {
+          content: [{ type: 'text', text: `Speech to text failed: ${err.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+
+  server.tool(
+    'gnani_text_to_speech',
+    'Synthesize a cook voice note with Gnani Timbre and return a playable audio URL',
+    {
+      text: z.string().describe('Instructions to speak'),
+      target_language: z.enum(['hi-IN', 'en-IN', 'mr-IN', 'hi-en']).default('hi-IN'),
+      speaker_gender: z.enum(['female', 'male']).default('female')
+    },
+    async ({ text, target_language, speaker_gender }) => {
+      console.log(`[TOOL CALL] gnani_text_to_speech language=${target_language}`);
+      try {
+        if (!process.env.GNANI_TTS_API_KEY) {
+          throw new Error('GNANI_TTS_API_KEY is not set');
+        }
+        const voice = gnaniVoice(target_language, speaker_gender);
+        const response = await fetch('https://api.vachana.ai/api/v1/tts/inference', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-API-Key-ID': process.env.GNANI_TTS_API_KEY
+          },
+          body: JSON.stringify({
+            text,
+            voice,
+            model: 'timbre-v2.5',
+            language: target_language,
+            speed: 1,
+            audio_config: {
+              sample_rate: 48000,
+              num_channels: 1,
+              sample_width: 2,
+              encoding: 'linear_pcm',
+              container: 'wav'
+            }
+          })
+        });
+        if (!response.ok) {
+          const errText = await response.text();
+          throw new Error(`Gnani TTS ${response.status}: ${errText.slice(0, 300)}`);
+        }
+        const audio = Buffer.from(await response.arrayBuffer());
+        const id = randomUUID();
+        audioClips.set(id, { buffer: audio, contentType: 'audio/wav' });
+        const path = `/audio/${id}.wav`;
+        const base = publicBaseUrl();
+        console.log(`[TOOL SUCCESS] gnani_text_to_speech bytes=${audio.length} voice=${voice}`);
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              audio_url: base ? `${base}${path}` : path,
+              voice,
+              language: target_language,
+              bytes: audio.length
+            }, null, 2)
+          }]
+        };
+      } catch (err) {
+        console.error('[TOOL ERROR] gnani_text_to_speech failed:', err);
+        return {
+          content: [{ type: 'text', text: `Text to speech failed: ${err.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+
   return server;
 }
 
 const transports = new Map();
+
+app.get('/audio/:id', (req, res) => {
+  const id = req.params.id.replace(/\.(mp3|wav)$/, '');
+  const clip = audioClips.get(id);
+  if (!clip) return res.status(404).send('Audio not found');
+  res.setHeader('Content-Type', clip.contentType);
+  res.setHeader('Cache-Control', 'no-store');
+  res.send(clip.buffer);
+});
 
 app.get('/sse', async (req, res) => {
   const transport = new SSEServerTransport('/messages', res);
