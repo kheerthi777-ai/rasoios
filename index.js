@@ -10,7 +10,6 @@ import 'dotenv/config';
 const app = express();
 app.use(cors());
 
-// Log all incoming requests
 app.use((req, res, next) => {
   console.log(`[HTTP] ${req.method} ${req.url}`);
   next();
@@ -64,7 +63,7 @@ function createMcpServer() {
     }
   );
 
-  // Tool 2: Qualitative Taste & Quirks
+  // Tool 2: Qualitative Taste & Quirks (Semantic Vector Search)
   server.tool(
     'get_taste_profile_context',
     'Retrieve specific situational cooking quirks or dish-specific techniques via semantic search',
@@ -73,7 +72,7 @@ function createMcpServer() {
       console.log(`[TOOL CALL] get_taste_profile_context triggered with query: "${dish_query}"`);
       try {
         const response = await ai.models.embedContent({
-          model: 'text-embedding-004',
+          model: 'gemini-embedding-001',
           contents: dish_query,
           config: { outputDimensionality: 768 }
         });
@@ -113,29 +112,35 @@ function createMcpServer() {
     }
   );
 
-  // Tool 3: Quantitative Inventory Check
+  // Tool 3: Quantitative Inventory Check (Flexible SKU / Ingredient match)
   server.tool(
     'check_pantry_inventory',
     'Check deterministic stock levels for specified SKUs or ingredients',
-    { required_skus: z.array(z.string()).describe('List of SKUs, e.g. ["Fresh Paneer 200g", "Green Peas 250g"]') },
+    { required_skus: z.array(z.string()).describe('List of SKUs or ingredients, e.g. ["paneer", "bread"]') },
     async ({ required_skus }) => {
-      console.log(`[TOOL CALL] check_pantry_inventory triggered for SKUs:`, required_skus);
+      console.log(`[TOOL CALL] check_pantry_inventory triggered for:`, required_skus);
       try {
-        const { rows } = await pool.query(
-          `SELECT sku, quantity, unit FROM pantry_inventory WHERE sku = ANY($1);`,
-          [required_skus]
-        );
+        // Fetch full pantry to allow substring/case-insensitive matching
+        const { rows } = await pool.query(`SELECT sku, quantity, unit FROM pantry_inventory;`);
 
-        const foundMap = new Map(rows.map(r => [r.sku, r]));
         const inStock = [];
         const outOfStock = [];
 
-        for (const sku of required_skus) {
-          const item = foundMap.get(sku);
-          if (item && Number(item.quantity) > 0) {
-            inStock.push(item);
+        for (const req of required_skus) {
+          const reqClean = req.toLowerCase();
+          const match = rows.find(item =>
+            item.sku.toLowerCase().includes(reqClean) || reqClean.includes(item.sku.toLowerCase())
+          );
+
+          if (match && Number(match.quantity) > 0) {
+            inStock.push(match);
           } else {
-            outOfStock.push({ sku, quantity: item ? item.quantity : 0, status: 'unavailable' });
+            outOfStock.push({
+              requested: req,
+              matched_sku: match ? match.sku : null,
+              quantity: match ? match.quantity : 0,
+              status: 'unavailable'
+            });
           }
         }
 
