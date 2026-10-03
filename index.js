@@ -67,6 +67,132 @@ function twilioWhatsappAddress(phone) {
   return `whatsapp:+${digits}`;
 }
 
+async function deliverTelegram(messageText, preferredChatId) {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  const fallbackChatId = process.env.TELEGRAM_GROUP_CHAT_ID || process.env.TELEGRAM_CHAT_ID;
+  const chatIds = [...new Set([preferredChatId, fallbackChatId].filter(Boolean).map(String))];
+  if (!botToken || chatIds.length === 0) {
+    throw new Error('TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are not set');
+  }
+  let lastError = 'Telegram API error';
+  for (const targetChatId of chatIds) {
+    for (const parseMode of ['Markdown', null]) {
+      const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: targetChatId,
+          text: messageText,
+          ...(parseMode ? { parse_mode: parseMode } : {})
+        })
+      });
+      const result = await response.json();
+      if (result.ok) {
+        return { message_id: result.result.message_id, chat_id: targetChatId };
+      }
+      lastError = result.description || lastError;
+      const retryPlain = parseMode && /parse|markdown|entity/i.test(lastError);
+      const retryOtherChat = /chat not found|bot was blocked|user is deactivated|PEER_ID_INVALID/i.test(lastError);
+      if (retryPlain) continue;
+      if (retryOtherChat) break;
+      throw new Error(lastError);
+    }
+  }
+  throw new Error(lastError);
+}
+
+function householdGroupId() {
+  if (process.env.TELEGRAM_GROUP_CHAT_ID) return String(process.env.TELEGRAM_GROUP_CHAT_ID);
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (chatId && String(chatId).startsWith('-')) return String(chatId);
+  return null;
+}
+
+function conductorReplyText(payload) {
+  const output = payload?.output ?? payload?.result?.output;
+  if (typeof output === 'string' && output.trim()) return output.trim();
+  if (output && typeof output === 'object') {
+    const text = output.answer || output.text || output.message || output.response;
+    if (typeof text === 'string' && text.trim()) return text.trim();
+  }
+  if (typeof payload?.error === 'string' && payload.error.trim()) return payload.error.trim();
+  return '';
+}
+
+async function askConductor(text, fromName) {
+  const apiKey = process.env.AGENTICORG_API_KEY;
+  const agentId = process.env.AGENTICORG_AGENT_ID;
+  if (!apiKey || !agentId) return null;
+  const base = (process.env.AGENTICORG_BASE_URL || 'https://app.agenticorg.ai').replace(/\/$/, '');
+  const inputs = { query: text, source: 'telegram_group', from: fromName };
+  const isUuid = agentId.includes('-') && agentId.length > 30;
+  const url = isUuid ? `${base}/api/v1/agents/${agentId}/run` : `${base}/api/v1/a2a/tasks`;
+  const body = isUuid
+    ? { action: 'process', inputs, context: {} }
+    : { agent_type: agentId, action: 'process', inputs, context: {} };
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload?.detail || payload?.error || `Agent request failed with ${response.status}`);
+  }
+  return conductorReplyText(payload) || 'The kitchen agent returned an empty answer.';
+}
+
+async function handleTelegramUpdate(update) {
+  const message = update?.message;
+  if (!message?.text || message.from?.is_bot) return;
+  const chat = message.chat;
+  if (!chat || (chat.type !== 'group' && chat.type !== 'supergroup')) return;
+  const allowed = householdGroupId();
+  if (allowed && String(chat.id) !== allowed) {
+    console.log(`[TELEGRAM] Ignored chat ${chat.id}; household group is ${allowed}`);
+    return;
+  }
+  const fromName = [message.from?.first_name, message.from?.last_name].filter(Boolean).join(' ');
+  console.log(`[TELEGRAM IN] chat=${chat.id} from=${fromName} text=${message.text}`);
+  let reply;
+  try {
+    reply = await askConductor(message.text, fromName);
+  } catch (err) {
+    console.error('[TELEGRAM] conductor failed:', err);
+    reply = `I got the message, and the kitchen agent failed: ${err.message}`;
+  }
+  if (!reply) {
+    reply = `Got it in this group. Chat id ${chat.id}. The kitchen agent is not connected yet.`;
+  }
+  const receipt = await deliverTelegram(reply, String(chat.id));
+  console.log(`[TELEGRAM OUT] chat=${receipt.chat_id} message_id=${receipt.message_id}`);
+}
+
+async function registerTelegramWebhook() {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) return;
+  const webhookUrl = `${publicBaseUrl()}/telegram/webhook`;
+  const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
+  const response = await fetch(`https://api.telegram.org/bot${botToken}/setWebhook`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      url: webhookUrl,
+      allowed_updates: ['message'],
+      ...(secret ? { secret_token: secret } : {})
+    })
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!payload.ok) {
+    console.error('[TELEGRAM] setWebhook failed:', payload.description || response.status);
+    return;
+  }
+  console.log(`[TELEGRAM] Webhook set to ${webhookUrl}`);
+}
+
 async function sendTwilioWhatsapp({ recipient_phone, message_body }) {
   const accountSid = process.env.TWILIO_ACCOUNT_SID;
   const authToken = process.env.TWILIO_AUTH_TOKEN;
@@ -521,57 +647,28 @@ function createMcpServer() {
 
   server.tool(
     'send_telegram_notification',
-    'Sends real-time prep instructions, missing grocery alerts, or approval cards to the user via Telegram',
+    'Sends real-time prep instructions, missing grocery alerts, or approval cards to the household Telegram group',
     {
       message_text: z.string().describe('Custom message content to send (supports Markdown)'),
-      chat_id: z.string().optional().describe('Telegram chat ID of the user')
+      chat_id: z.string().optional().describe('Telegram group chat id. Defaults to the household group.')
     },
     async ({ message_text, chat_id }) => {
-      const botToken = process.env.TELEGRAM_BOT_TOKEN;
-      const fallbackChatId = process.env.TELEGRAM_CHAT_ID;
-      const chatIds = [...new Set([chat_id, fallbackChatId].filter(Boolean))];
-      console.log(`[TELEGRAM DISPATCH] Sending to chat_id: ${chatIds.join(' or ')}`);
+      console.log(`[TELEGRAM DISPATCH] Sending to chat_id: ${chat_id || process.env.TELEGRAM_GROUP_CHAT_ID || process.env.TELEGRAM_CHAT_ID}`);
       try {
-        if (!botToken || chatIds.length === 0) {
-          throw new Error('TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are not set');
-        }
-        let lastError = 'Telegram API error';
-        for (const targetChatId of chatIds) {
-          for (const parseMode of ['Markdown', null]) {
-            const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                chat_id: targetChatId,
-                text: message_text,
-                ...(parseMode ? { parse_mode: parseMode } : {})
-              })
-            });
-            const result = await response.json();
-            if (result.ok) {
-              console.log(`[TELEGRAM SUCCESS] Message sent. ID: ${result.result.message_id}`);
-              return {
-                content: [{
-                  type: 'text',
-                  text: JSON.stringify({
-                    status: 'DELIVERED',
-                    provider: 'telegram',
-                    message_id: result.result.message_id,
-                    chat_id: String(targetChatId),
-                    timestamp: new Date().toISOString()
-                  }, null, 2)
-                }]
-              };
-            }
-            lastError = result.description || lastError;
-            const retryPlain = parseMode && /parse|markdown|entity/i.test(lastError);
-            const retryOtherChat = /chat not found|bot was blocked|user is deactivated|PEER_ID_INVALID/i.test(lastError);
-            if (retryPlain) continue;
-            if (retryOtherChat) break;
-            throw new Error(lastError);
-          }
-        }
-        throw new Error(lastError);
+        const receipt = await deliverTelegram(message_text, chat_id);
+        console.log(`[TELEGRAM SUCCESS] Message sent. ID: ${receipt.message_id}`);
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              status: 'DELIVERED',
+              provider: 'telegram',
+              message_id: receipt.message_id,
+              chat_id: receipt.chat_id,
+              timestamp: new Date().toISOString()
+            }, null, 2)
+          }]
+        };
       } catch (err) {
         console.error('[TELEGRAM ERROR]', err);
         return {
@@ -622,6 +719,17 @@ app.get('/sse', async (req, res) => {
   await server.connect(transport);
 });
 
+app.post('/telegram/webhook', express.json({ limit: '1mb' }), (req, res) => {
+  const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
+  if (secret && req.get('x-telegram-bot-api-secret-token') !== secret) {
+    return res.sendStatus(401);
+  }
+  res.sendStatus(200);
+  handleTelegramUpdate(req.body).catch((err) => {
+    console.error('[TELEGRAM] update failed:', err);
+  });
+});
+
 app.post('/messages', async (req, res) => {
   const sessionId = req.query.sessionId;
   console.log(`[MESSAGES] Incoming POST for sessionId: ${sessionId}`);
@@ -638,4 +746,7 @@ app.post('/messages', async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✓ MCP SSE Server listening on port ${PORT}`);
+  registerTelegramWebhook().catch((err) => {
+    console.error('[TELEGRAM] webhook registration failed:', err);
+  });
 });
