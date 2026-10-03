@@ -161,6 +161,51 @@ function createMcpServer() {
     }
   );
 
+  // Tool 4: Household stock book
+  server.tool(
+    'fridge_snapshot',
+    'Return the household stock book, optionally filtered by storage location or item form',
+    {
+      location: z.enum(['fridge', 'freezer', 'pantry', 'masala_dabba', 'counter']).optional()
+        .describe('Storage location. Omit to return the full household.'),
+      form: z.enum(['raw', 'packet', 'dabba', 'chutney', 'leftover', 'batter', 'opened', 'hardware']).optional()
+        .describe('Item form, such as leftover, chutney, or hardware.')
+    },
+    async ({ location, form }) => {
+      console.log(`[TOOL CALL] fridge_snapshot location=${location || 'all'} form=${form || 'all'}`);
+      try {
+        let query = `
+          SELECT canonical_id, name, location, form, quantity, unit, usable_today
+          FROM household_inventory
+          WHERE 1=1`;
+        const params = [];
+        if (location) {
+          params.push(location);
+          query += ` AND location = $${params.length}`;
+        }
+        if (form) {
+          params.push(form);
+          query += ` AND form = $${params.length}`;
+        }
+        query += ` ORDER BY location, name ASC`;
+        const { rows } = await pool.query(query, params);
+        console.log(`[TOOL SUCCESS] fridge_snapshot returned ${rows.length} rows`);
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({ count: rows.length, items: rows }, null, 2)
+          }]
+        };
+      } catch (err) {
+        console.error('[TOOL ERROR] fridge_snapshot failed:', err);
+        return {
+          content: [{ type: 'text', text: `Fridge snapshot failed: ${err.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+
   return server;
 }
 
