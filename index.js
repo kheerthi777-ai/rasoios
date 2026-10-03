@@ -51,6 +51,14 @@ function gnaniVoice(language, speakerGender) {
   return 'Nalini';
 }
 
+function whatsappRecipient(phone) {
+  const digits = String(phone).replace(/\D/g, '');
+  if (digits.length < 10) {
+    throw new Error('Phone number needs a country code, for example +919876543210');
+  }
+  return digits;
+}
+
 function createMcpServer() {
   const server = new McpServer({
     name: 'rasoios-pantry-mcp',
@@ -367,7 +375,7 @@ function createMcpServer() {
 
   server.tool(
     'whatsapp_send_message',
-    'Dispatches a formatted recipe, prep task, or authorization request to WhatsApp',
+    'Sends a recipe, prep task, or approval request as a WhatsApp text message',
     {
       recipient_phone: z.string().describe('Target phone number with country code, e.g. +919876543210'),
       message_body: z.string().describe('Bulleted WhatsApp formatted message content'),
@@ -375,19 +383,53 @@ function createMcpServer() {
     },
     async ({ recipient_phone, message_body, message_type }) => {
       console.log(`[WHATSAPP DISPATCH] To: ${recipient_phone} | Type: ${message_type}`);
-      console.log(`[WHATSAPP BODY]\n${message_body}`);
-      return {
-        content: [{
-          type: 'text',
-          text: JSON.stringify({
-            status: 'DELIVERED',
-            message_id: `wamid_${Date.now()}`,
-            recipient: recipient_phone,
-            message_type,
-            timestamp: new Date().toISOString()
-          }, null, 2)
-        }]
-      };
+      try {
+        const token = process.env.WHATSAPP_ACCESS_TOKEN;
+        const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+        if (!token || !phoneNumberId) {
+          throw new Error('WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID are not set');
+        }
+        const to = whatsappRecipient(recipient_phone);
+        const response = await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            messaging_product: 'whatsapp',
+            recipient_type: 'individual',
+            to,
+            type: 'text',
+            text: { preview_url: false, body: message_body }
+          })
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const message = payload?.error?.message || `WhatsApp request failed with ${response.status}`;
+          throw new Error(message);
+        }
+        const messageId = payload?.messages?.[0]?.id || null;
+        console.log(`[WHATSAPP SENT] id=${messageId} to=${to}`);
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              status: 'SENT',
+              message_id: messageId,
+              recipient: to,
+              message_type,
+              timestamp: new Date().toISOString()
+            }, null, 2)
+          }]
+        };
+      } catch (err) {
+        console.error('[TOOL ERROR] whatsapp_send_message failed:', err);
+        return {
+          content: [{ type: 'text', text: `WhatsApp send failed: ${err.message}` }],
+          isError: true
+        };
+      }
     }
   );
 
