@@ -196,14 +196,27 @@ function createMcpServer() {
     'fridge_snapshot',
     'Return the household stock book, optionally filtered by storage location or item form',
     {
-      location: z.enum(['fridge', 'freezer', 'pantry', 'masala_dabba', 'counter']).optional()
-        .describe('Storage location. Omit to return the full household.'),
-      form: z.enum(['raw', 'packet', 'dabba', 'chutney', 'leftover', 'batter', 'opened', 'hardware']).optional()
-        .describe('Item form, such as leftover, chutney, or hardware.')
+      location: z.string().optional()
+        .describe('fridge, freezer, pantry, masala_dabba, or counter. Omit, blank, or "all" for the full household.'),
+      form: z.string().optional()
+        .describe('raw, packet, dabba, chutney, leftover, batter, opened, or hardware. Omit, blank, or "all" for every form.')
     },
     async ({ location, form }) => {
+      const locations = new Set(['fridge', 'freezer', 'pantry', 'masala_dabba', 'counter']);
+      const forms = new Set(['raw', 'packet', 'dabba', 'chutney', 'leftover', 'batter', 'opened', 'hardware']);
+      const clean = (value, allowed) => {
+        if (value == null) return undefined;
+        const normalized = String(value).trim().toLowerCase();
+        if (!normalized || normalized === 'all' || normalized === 'any' || normalized === 'none') return undefined;
+        if (!allowed.has(normalized)) {
+          throw new Error(`Use one of: ${[...allowed].join(', ')}`);
+        }
+        return normalized;
+      };
       console.log(`[TOOL CALL] fridge_snapshot location=${location || 'all'} form=${form || 'all'}`);
       try {
+        location = clean(location, locations);
+        form = clean(form, forms);
         let query = `
           SELECT canonical_id, name, location, form, quantity, unit, usable_today
           FROM household_inventory
