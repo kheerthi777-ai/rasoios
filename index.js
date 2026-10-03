@@ -30,10 +30,19 @@ const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY
 });
 
-const audioClips = new Map();
-
 function publicBaseUrl() {
-  return (process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/$/, '');
+  return (process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || 'https://rasoios.onrender.com').replace(/\/$/, '');
+}
+
+async function ensureVoiceClips() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS voice_clips (
+      id UUID PRIMARY KEY,
+      content_type TEXT NOT NULL,
+      audio BYTEA NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
 }
 
 function gnaniVoice(language, speakerGender) {
@@ -327,7 +336,11 @@ function createMcpServer() {
         }
         const audio = Buffer.from(await response.arrayBuffer());
         const id = randomUUID();
-        audioClips.set(id, { buffer: audio, contentType: 'audio/wav' });
+        await ensureVoiceClips();
+        await pool.query(
+          `INSERT INTO voice_clips (id, content_type, audio) VALUES ($1, 'audio/wav', $2)`,
+          [id, audio]
+        );
         const path = `/audio/${id}.wav`;
         const base = publicBaseUrl();
         console.log(`[TOOL SUCCESS] gnani_text_to_speech bytes=${audio.length} voice=${voice}`);
@@ -357,13 +370,24 @@ function createMcpServer() {
 
 const transports = new Map();
 
-app.get('/audio/:id', (req, res) => {
+app.get('/audio/:id', async (req, res) => {
   const id = req.params.id.replace(/\.(mp3|wav)$/, '');
-  const clip = audioClips.get(id);
-  if (!clip) return res.status(404).send('Audio not found');
-  res.setHeader('Content-Type', clip.contentType);
-  res.setHeader('Cache-Control', 'no-store');
-  res.send(clip.buffer);
+  try {
+    await ensureVoiceClips();
+    const { rows } = await pool.query(
+      `SELECT content_type, audio FROM voice_clips WHERE id = $1`,
+      [id]
+    );
+    const clip = rows[0];
+    if (!clip) return res.status(404).send('Audio not found');
+    const body = clip.audio || clip.buffer;
+    res.setHeader('Content-Type', clip.content_type || clip.contentType);
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.send(body);
+  } catch (err) {
+    console.error('[AUDIO] lookup failed:', err);
+    res.status(500).send('Audio lookup failed');
+  }
 });
 
 app.get('/sse', async (req, res) => {
