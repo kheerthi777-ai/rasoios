@@ -36,7 +36,12 @@ async function seed() {
       }
     });
 
-    const vector = JSON.stringify(response.embedding.values);
+    const values = response.embeddings?.[0]?.values || response.embedding?.values;
+    if (!values) {
+      throw new Error(`Embedding values missing: ${JSON.stringify(response)}`);
+    }
+
+    const vector = JSON.stringify(values);
 
     await pool.query(
       `INSERT INTO taste_profiles (category, preference, embedding) VALUES ($1, $2, $3::vector)`,
