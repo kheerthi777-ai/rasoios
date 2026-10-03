@@ -4,6 +4,12 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
+import pg from 'pg';
+import { GoogleGenAI } from '@google/genai';
+import 'dotenv/config';
+
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 const app = express();
 app.use(cors());
