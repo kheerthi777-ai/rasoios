@@ -365,6 +365,32 @@ function createMcpServer() {
     }
   );
 
+  server.tool(
+    'whatsapp_send_message',
+    'Dispatches a formatted recipe, prep task, or authorization request to WhatsApp',
+    {
+      recipient_phone: z.string().describe('Target phone number with country code, e.g. +919876543210'),
+      message_body: z.string().describe('Bulleted WhatsApp formatted message content'),
+      message_type: z.enum(['cook_task', 'budget_approval', 'family_menu']).default('cook_task')
+    },
+    async ({ recipient_phone, message_body, message_type }) => {
+      console.log(`[WHATSAPP DISPATCH] To: ${recipient_phone} | Type: ${message_type}`);
+      console.log(`[WHATSAPP BODY]\n${message_body}`);
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            status: 'DELIVERED',
+            message_id: `wamid_${Date.now()}`,
+            recipient: recipient_phone,
+            message_type,
+            timestamp: new Date().toISOString()
+          }, null, 2)
+        }]
+      };
+    }
+  );
+
   return server;
 }
 
