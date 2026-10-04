@@ -168,27 +168,42 @@ async function loadHouseholdContext() {
   return { taste: taste.rows, stock: stock.rows };
 }
 
+function isBusyModelError(err) {
+  return /503|429|UNAVAILABLE|high demand|resource exhausted/i.test(String(err?.message || err));
+}
+
 async function suggestFromHousehold(text, fromName) {
   if (!process.env.GEMINI_API_KEY) return null;
   const { taste, stock } = await loadHouseholdContext();
-  const response = await ai.models.generateContent({
-    model: 'gemini-3.8-flash',
-    contents: [
-      'You are the RasoiOS kitchen conductor answering a household Telegram message.',
-      'Use only the stock and taste rows below. Do not invent a quantity.',
-      'Suggest two or three dishes that can be made now. The main ingredient must be present.',
-      'Do not suggest a paneer dish if paneer quantity is 0. Prefer usable_today leftovers and chutneys.',
-      'About 80% of the other ingredients must be present. Name any missing garnish in one line.',
-      'Taste rules: toast bread firm, no raw onion, medium spice, light oil, fry paneer before gravy.',
-      'Reply in plain text, under 900 characters, ready to send on Telegram.',
-      `From: ${fromName || 'household'}`,
-      `Message: ${text}`,
-      `Taste: ${JSON.stringify(taste)}`,
-      `Stock: ${JSON.stringify(stock)}`
-    ].join('\n')
-  });
-  const answer = typeof response.text === 'string' ? response.text.trim() : '';
-  return answer || null;
+  const contents = [
+    'You are the RasoiOS kitchen conductor answering a household Telegram message.',
+    'Use only the stock and taste rows below. Do not invent a quantity.',
+    'Suggest two or three dishes that can be made now. The main ingredient must be present.',
+    'Do not suggest a paneer dish if paneer quantity is 0. Prefer usable_today leftovers and chutneys.',
+    'About 80% of the other ingredients must be present. Name any missing garnish in one line.',
+    'Taste rules: toast bread firm, no raw onion, medium spice, light oil, fry paneer before gravy.',
+    'Reply in plain text, under 900 characters, ready to send on Telegram.',
+    `From: ${fromName || 'household'}`,
+    `Message: ${text}`,
+    `Taste: ${JSON.stringify(taste)}`,
+    `Stock: ${JSON.stringify(stock)}`
+  ].join('\n');
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents
+      });
+      const answer = typeof response.text === 'string' ? response.text.trim() : '';
+      if (answer) return answer;
+    } catch (err) {
+      lastError = err;
+      if (!isBusyModelError(err) || attempt === 3) throw err;
+      await new Promise((resolve) => setTimeout(resolve, attempt * 1500));
+    }
+  }
+  throw lastError;
 }
 
 async function handleTelegramUpdate(update) {
@@ -212,7 +227,9 @@ async function handleTelegramUpdate(update) {
     }
   } catch (err) {
     console.error('[TELEGRAM] reply failed:', err);
-    reply = `I got the message, and the kitchen reply failed: ${err.message}`;
+    reply = isBusyModelError(err)
+      ? 'The kitchen model is busy right now. Ask "what should we cook?" again in a minute.'
+      : `I got the message, and the kitchen reply failed: ${err.message}`;
   }
   if (!reply) {
     reply = `Got it. Chat id ${chat.id}. Set TELEGRAM_GROUP_CHAT_ID to this id if this is the household group.`;
