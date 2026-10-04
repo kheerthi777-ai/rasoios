@@ -1082,43 +1082,65 @@ function createMcpServer() {
 
   
   // Tool 11: Pine Labs P3P ReservePay Rail
+  
+  // Tool 11: Pine Labs P3P ReservePay Rail with Weekly Budget & Low-Balance Alert
   server.tool(
     "pinelabs_reservepay_debit",
-    "Execute autonomous agent-to-agent procurement debit via Pine Labs P3P ReservePay",
+    "Execute autonomous agent-to-agent procurement debit via Pine Labs P3P ReservePay against a weekly rolling budget",
     {
       amount_inr: z.number().positive().describe("Total transaction amount in INR to debit"),
       order_id: z.string().describe("Unique merchant/procurement order reference ID"),
       purpose: z.string().describe("Itemized summary or reason for procurement"),
-      simulate_failure: z.enum(["none", "insufficient_balance", "network_timeout"]).optional().default("none")
+      reset_weekly_budget: z.boolean().optional().describe("Set to true to reset the weekly budget back to initial cap")
     },
-    async ({ amount_inr, order_id, purpose, simulate_failure }) => {
-      console.log(`[P3P RESERVEPAY] Processing debit of ₹${amount_inr} for order: ${order_id} (${purpose})`);
-      const limit = Number(process.env.PER_CART_LIMIT_INR || 500);
-
-      if (simulate_failure === "network_timeout") {
-        return {
-          isError: true,
-          content: [{ type: "text", text: "Pine Labs Gateway Timeout (HTTP 504): Settlement rail unresponsive." }]
-        };
+    async ({ amount_inr, order_id, purpose, reset_weekly_budget }) => {
+      if (reset_weekly_budget) {
+        weeklyWallet.balance_inr = weeklyWallet.budget_cap_inr;
+        weeklyWallet.last_reset = new Date().toISOString();
+        console.log(`[P3P RESERVEPAY] Weekly budget reset to ₹${weeklyWallet.balance_inr}`);
       }
 
-      if (simulate_failure === "insufficient_balance" || amount_inr > limit) {
-        console.warn(`[P3P RESERVEPAY] Amount ₹${amount_inr} rejected (limit: ₹${limit})`);
+      console.log(`[P3P RESERVEPAY] Initiating debit of ₹${amount_inr} for order: ${order_id} (${purpose}). Current balance: ₹${weeklyWallet.balance_inr}`);
+
+      // Check per-cart limit
+      const perCartLimit = Number(process.env.PER_CART_LIMIT_INR || 500);
+      if (amount_inr > perCartLimit) {
         return {
           content: [{
             type: "text",
             text: JSON.stringify({
-              status: "REJECTED_OVER_LIMIT",
+              status: "REJECTED_OVER_CART_LIMIT",
               amount_inr,
-              limit_inr: limit,
-              error_code: "P3P_LIMIT_EXCEEDED",
-              reason: `Transaction amount ₹${amount_inr} exceeds autonomous per-cart limit of ₹${limit}. Human authorization required.`
+              per_cart_limit_inr: perCartLimit,
+              remaining_balance_inr: weeklyWallet.balance_inr,
+              error_code: "P3P_CART_LIMIT_EXCEEDED",
+              reason: `Transaction amount ₹${amount_inr} exceeds autonomous per-cart ceiling of ₹${perCartLimit}. Human approval required.`
             }, null, 2)
           }]
         };
       }
 
+      // Check weekly balance sufficiency
+      if (amount_inr > weeklyWallet.balance_inr) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              status: "REJECTED_INSUFFICIENT_FUNDS",
+              amount_inr,
+              remaining_balance_inr: weeklyWallet.balance_inr,
+              error_code: "P3P_INSUFFICIENT_WEEKLY_BALANCE",
+              reason: `Insufficient weekly wallet balance (₹${weeklyWallet.balance_inr}). Cannot debit ₹${amount_inr}.`
+            }, null, 2)
+          }]
+        };
+      }
+
+      // Deduct balance
+      weeklyWallet.balance_inr -= amount_inr;
+      const lowBalanceAlert = weeklyWallet.balance_inr < 200;
       const txnId = `PL_TXN_${Date.now()}`;
+
       return {
         content: [{
           type: "text",
@@ -1130,13 +1152,16 @@ function createMcpServer() {
             order_id,
             amount_inr,
             purpose,
-            settlement_mode: "instant_agent_rail",
+            remaining_balance_inr: weeklyWallet.balance_inr,
+            low_balance_alert: lowBalanceAlert,
+            alert_message: lowBalanceAlert ? `WARNING: Weekly grocery wallet balance is low (₹${weeklyWallet.balance_inr} remaining, below ₹200 threshold).` : null,
             timestamp: new Date().toISOString()
           }, null, 2)
         }]
       };
     }
   );
+
 
   return server;
 }
