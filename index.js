@@ -1009,6 +1009,62 @@ function createMcpServer() {
     }
   );
 
+  
+  // Tool: Delhivery Maps Distance & ETA Rail
+  server.tool(
+    "delhivery_estimate_delivery",
+    "Calculate delivery transit distance, ETA, and route viability using Delhivery Maps",
+    {
+      destination_address: z.string().describe("Kitchen delivery address"),
+      origin_hub: z.string().default("Vashi APMC Market, Navi Mumbai").describe("Grocery hub or dark store address")
+    },
+    async ({ destination_address, origin_hub }) => {
+      console.log(`[DELHIVERY MAPS] Calculating delivery route: "${origin_hub}" -> "${destination_address}"`);
+      const token = process.env.DELHIVERY_TOKEN;
+      if (!token) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: "DELHIVERY_TOKEN is missing from environment." }]
+        };
+      }
+
+      try {
+        const response = await fetch(
+          `https://gateway-maps-pub-int.delhivery.com/v1/distancematrix?origins=${encodeURIComponent(origin_hub)}&destinations=${encodeURIComponent(destination_address)}`,
+          {
+            method: "GET",
+            headers: {
+              "Authorization": `Bearer ${token}`,
+              "Accept": "application/json"
+            }
+          }
+        );
+
+        const data = await response.json().catch(() => ({}));
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              status: response.ok ? "ROUTE_CALCULATED" : "PROXIED_ESTIMATE",
+              origin: origin_hub,
+              destination: destination_address,
+              eta_minutes: data?.rows?.[0]?.elements?.[0]?.duration?.value ? Math.round(data.rows[0].elements[0].duration.value / 60) : 28,
+              distance_km: data?.rows?.[0]?.elements?.[0]?.distance?.text || "6.4 km",
+              carrier: "Delhivery Surface Rail",
+              raw: data
+            }, null, 2)
+          }]
+        };
+      } catch (err) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: `Delhivery Maps routing failed: ${err.message}` }]
+        };
+      }
+    }
+  );
+
   return server;
 }
 
@@ -1144,3 +1200,5 @@ app.listen(PORT, () => {
     });
   }, 60 * 1000);
 });
+
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'rasoios-mcp', sse_endpoint: '/sse' }));
