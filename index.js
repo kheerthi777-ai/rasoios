@@ -145,14 +145,56 @@ async function askConductor(text, fromName) {
   return conductorReplyText(payload) || 'The kitchen agent returned an empty answer.';
 }
 
+function isHouseholdChat(chat) {
+  if (!chat) return false;
+  const groupId = householdGroupId();
+  if (groupId) return String(chat.id) === groupId;
+  if (chat.type === 'group' || chat.type === 'supergroup') return true;
+  const privateId = process.env.TELEGRAM_CHAT_ID;
+  return Boolean(privateId) && chat.type === 'private' && String(chat.id) === String(privateId);
+}
+
+async function loadHouseholdContext() {
+  const taste = await pool.query(
+    `SELECT category, preference FROM taste_profiles ORDER BY category ASC`
+  );
+  const stock = await pool.query(
+    `SELECT canonical_id, name, location, form, quantity, unit, usable_today
+     FROM household_inventory
+     ORDER BY location, name ASC`
+  );
+  return { taste: taste.rows, stock: stock.rows };
+}
+
+async function suggestFromHousehold(text, fromName) {
+  if (!process.env.GEMINI_API_KEY) return null;
+  const { taste, stock } = await loadHouseholdContext();
+  const response = await ai.models.generateContent({
+    model: 'gemini-3.8-flash',
+    contents: [
+      'You are the RasoiOS kitchen conductor answering a household Telegram message.',
+      'Use only the stock and taste rows below. Do not invent a quantity.',
+      'Suggest two or three dishes that can be made now. The main ingredient must be present.',
+      'Do not suggest a paneer dish if paneer quantity is 0. Prefer usable_today leftovers and chutneys.',
+      'About 80% of the other ingredients must be present. Name any missing garnish in one line.',
+      'Taste rules: toast bread firm, no raw onion, medium spice, light oil, fry paneer before gravy.',
+      'Reply in plain text, under 900 characters, ready to send on Telegram.',
+      `From: ${fromName || 'household'}`,
+      `Message: ${text}`,
+      `Taste: ${JSON.stringify(taste)}`,
+      `Stock: ${JSON.stringify(stock)}`
+    ].join('\n')
+  });
+  const answer = typeof response.text === 'string' ? response.text.trim() : '';
+  return answer || null;
+}
+
 async function handleTelegramUpdate(update) {
   const message = update?.message;
   if (!message?.text || message.from?.is_bot) return;
   const chat = message.chat;
-  if (!chat || (chat.type !== 'group' && chat.type !== 'supergroup')) return;
-  const allowed = householdGroupId();
-  if (allowed && String(chat.id) !== allowed) {
-    console.log(`[TELEGRAM] Ignored chat ${chat.id}; household group is ${allowed}`);
+  if (!isHouseholdChat(chat)) {
+    console.log(`[TELEGRAM] Ignored chat ${chat?.id} type=${chat?.type}`);
     return;
   }
   const fromName = [message.from?.first_name, message.from?.last_name].filter(Boolean).join(' ');
@@ -160,12 +202,13 @@ async function handleTelegramUpdate(update) {
   let reply;
   try {
     reply = await askConductor(message.text, fromName);
+    if (!reply) reply = await suggestFromHousehold(message.text, fromName);
   } catch (err) {
-    console.error('[TELEGRAM] conductor failed:', err);
-    reply = `I got the message, and the kitchen agent failed: ${err.message}`;
+    console.error('[TELEGRAM] reply failed:', err);
+    reply = `I got the message, and the kitchen reply failed: ${err.message}`;
   }
   if (!reply) {
-    reply = `Got it in this group. Chat id ${chat.id}. The kitchen agent is not connected yet.`;
+    reply = `Got it. Chat id ${chat.id}. Set TELEGRAM_GROUP_CHAT_ID to this id if this is the household group.`;
   }
   const receipt = await deliverTelegram(reply, String(chat.id));
   console.log(`[TELEGRAM OUT] chat=${receipt.chat_id} message_id=${receipt.message_id}`);
