@@ -478,6 +478,21 @@ async function handleTelegramUpdate(update) {
       reply = `Noted. The next meal will be ${moodWord}.`;
     } else {
       if (moodWord) await saveMood(chat.id, moodWord, 'reply');
+
+    // Direct routing to AgenticOrg Agent
+    if (process.env.AGENTICORG_API_KEY && process.env.AGENTICORG_AGENT_ID) {
+      try {
+        console.log(`[TELEGRAM] Routing message to AgenticOrg Agent Tukaram Mundhe...`);
+        const agentReply = await askConductor(text, fromName);
+        if (agentReply && agentReply !== "The kitchen agent returned an empty answer.") {
+          await sendTelegramMessage(chat.id, agentReply);
+          return;
+        }
+      } catch (err) {
+        console.error("[AGENTICORG ROUTING ERROR]", err.message);
+      }
+    }
+
       const mood = moodWord || (await latestMood(chat.id))?.mood;
       const decision = await dispatchHouseholdMeal({
         chatId: chat.id,
