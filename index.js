@@ -7,7 +7,7 @@ import pg from 'pg';
 import { GoogleGenAI } from '@google/genai';
 import { randomUUID } from 'crypto';
 import 'dotenv/config';
-import { applyCartGates, mealSituation, planFromStock } from './household-rules.js';
+import { applyCartGates, mealSituation } from './household-rules.js';
 
 const app = express();
 app.use(cors());
@@ -331,13 +331,11 @@ async function decideHouseholdMeal({ chatId, fromName, userText, mood }) {
   const { taste, stock } = await loadHouseholdContext();
   const spent = await weeklyCartSpend();
   const limits = {
-    cartLimit: Number(process.env.PER_CART_LIMIT_INR || 300),
-    weeklyBudget: Number(process.env.WEEKLY_BUDGET_INR || 2000),
+    cartLimit: process.env.PER_CART_LIMIT_INR ? Number(process.env.PER_CART_LIMIT_INR) : null,
+    weeklyBudget: process.env.WEEKLY_BUDGET_INR ? Number(process.env.WEEKLY_BUDGET_INR) : null,
     spent
   };
-  let raw = null;
-  try {
-    raw = await generateKitchenText([
+  const raw = await generateKitchenText([
     'Return one JSON object only. No markdown.',
     'You are deciding a real household meal. The wife is not typing. Decide from the stock.',
     'Main ingredient must be present. About 80% of the other ingredients must be present.',
@@ -355,16 +353,21 @@ async function decideHouseholdMeal({ chatId, fromName, userText, mood }) {
     `From: ${fromName || 'household'}`,
     `Taste: ${JSON.stringify(taste)}`,
     `Stock: ${JSON.stringify(stock)}`
-    ].join('\n'));
-  } catch (err) {
-    if (!isBusyModelError(err)) throw err;
-    console.error('[MEAL] model busy, using the stock decision');
+  ].join('\n'));
+  const plan = parsePlan(raw || '');
+  if (!plan) {
+    throw new Error('The meal model did not return a usable decision.');
   }
-  const plan = (raw && parsePlan(raw)) || planFromStock(stock, situation, mood, userText);
   const gates = applyCartGates(plan, limits);
-  const cartLine = gates.cartTotal > 0
-    ? `Cart ₹${gates.cartTotal}. Limit ₹${gates.cartLimit}. Weekly spend so far ₹${spent} of ₹${gates.weeklyBudget}.`
-    : 'No delivery cart. The meal can be made from what is already in the house.';
+  if (gates.cartTotal > 0 && (gates.cartLimit == null || gates.weeklyBudget == null)) {
+    gates.humanRequired = true;
+    gates.humanReason = gates.humanReason || 'Weekly budget and per-cart limit are not set, so the cart cannot be confirmed.';
+  }
+  const cartLine = gates.cartTotal === 0
+    ? 'No delivery cart. The meal can be made from what is already in the house.'
+    : gates.cartLimit == null || gates.weeklyBudget == null
+      ? `Cart ₹${gates.cartTotal}. Weekly budget and per-cart limit are not set.`
+      : `Cart ₹${gates.cartTotal}. Limit ₹${gates.cartLimit}. Weekly spend so far ₹${spent} of ₹${gates.weeklyBudget}.`;
   const gateLine = gates.humanRequired
     ? `A person needs to decide: ${gates.humanReason}`
     : 'No person is needed for this meal.';
