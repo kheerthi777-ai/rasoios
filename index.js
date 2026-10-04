@@ -147,11 +147,13 @@ async function askConductor(text, fromName) {
 
 function isHouseholdChat(chat) {
   if (!chat) return false;
-  const groupId = householdGroupId();
-  if (groupId) return String(chat.id) === groupId;
-  if (chat.type === 'group' || chat.type === 'supergroup') return true;
-  const privateId = process.env.TELEGRAM_CHAT_ID;
-  return Boolean(privateId) && chat.type === 'private' && String(chat.id) === String(privateId);
+  const groupId = process.env.TELEGRAM_GROUP_CHAT_ID;
+  if (groupId) {
+    if (String(chat.id) === String(groupId)) return true;
+    const privateId = process.env.TELEGRAM_CHAT_ID;
+    return Boolean(privateId) && chat.type === 'private' && String(chat.id) === String(privateId);
+  }
+  return chat.type === 'private' || chat.type === 'group' || chat.type === 'supergroup';
 }
 
 async function loadHouseholdContext() {
@@ -199,10 +201,15 @@ async function handleTelegramUpdate(update) {
   }
   const fromName = [message.from?.first_name, message.from?.last_name].filter(Boolean).join(' ');
   console.log(`[TELEGRAM IN] chat=${chat.id} from=${fromName} text=${message.text}`);
+  const text = message.text.trim();
   let reply;
   try {
-    reply = await askConductor(message.text, fromName);
-    if (!reply) reply = await suggestFromHousehold(message.text, fromName);
+    if (/^\/start\b/i.test(text)) {
+      reply = 'RasoiOS is here. Ask "what should we cook?"';
+    } else {
+      reply = await askConductor(text, fromName);
+      if (!reply) reply = await suggestFromHousehold(text, fromName);
+    }
   } catch (err) {
     console.error('[TELEGRAM] reply failed:', err);
     reply = `I got the message, and the kitchen reply failed: ${err.message}`;
@@ -760,6 +767,27 @@ app.get('/sse', async (req, res) => {
   };
 
   await server.connect(transport);
+});
+
+app.get('/telegram/status', async (req, res) => {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) return res.status(503).json({ ok: false, error: 'TELEGRAM_BOT_TOKEN is not set' });
+  try {
+    const [me, hook] = await Promise.all([
+      fetch(`https://api.telegram.org/bot${botToken}/getMe`).then((r) => r.json()),
+      fetch(`https://api.telegram.org/bot${botToken}/getWebhookInfo`).then((r) => r.json())
+    ]);
+    const info = hook.result || {};
+    res.json({
+      ok: Boolean(me.ok && hook.ok),
+      username: me.result?.username || null,
+      webhook_url: info.url || null,
+      pending_update_count: info.pending_update_count ?? null,
+      last_error_message: info.last_error_message || null
+    });
+  } catch (err) {
+    res.status(502).json({ ok: false, error: err.message });
+  }
 });
 
 app.post('/telegram/webhook', express.json({ limit: '1mb' }), (req, res) => {
