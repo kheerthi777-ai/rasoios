@@ -1084,26 +1084,26 @@ function createMcpServer() {
   // Tool 11: Pine Labs P3P ReservePay Rail
   
   // Tool 11: Pine Labs P3P ReservePay Rail with Weekly Budget & Low-Balance Alert
+  
+  // Global wallet fallback on globalThis to prevent any scope issues
+  if (!globalThis.rasoiWallet) {
+    globalThis.rasoiWallet = { balance: 2000, cap: 2000 };
+  }
+
+  // Tool 11: Pine Labs P3P ReservePay Rail
   server.tool(
     "pinelabs_reservepay_debit",
-    "Execute autonomous agent-to-agent procurement debit via Pine Labs P3P ReservePay against a weekly rolling budget",
+    "Execute autonomous agent-to-agent procurement debit via Pine Labs P3P ReservePay",
     {
       amount_inr: z.number().positive().describe("Total transaction amount in INR to debit"),
       order_id: z.string().describe("Unique merchant/procurement order reference ID"),
-      purpose: z.string().describe("Itemized summary or reason for procurement"),
-      reset_weekly_budget: z.boolean().optional().describe("Set to true to reset the weekly budget back to initial cap")
+      purpose: z.string().describe("Itemized summary or reason for procurement")
     },
-    async ({ amount_inr, order_id, purpose, reset_weekly_budget }) => {
-      if (reset_weekly_budget) {
-        weeklyWallet.balance_inr = weeklyWallet.budget_cap_inr;
-        weeklyWallet.last_reset = new Date().toISOString();
-        console.log(`[P3P RESERVEPAY] Weekly budget reset to ₹${weeklyWallet.balance_inr}`);
-      }
-
-      console.log(`[P3P RESERVEPAY] Initiating debit of ₹${amount_inr} for order: ${order_id} (${purpose}). Current balance: ₹${weeklyWallet.balance_inr}`);
+    async ({ amount_inr, order_id, purpose }) => {
+      console.log(`[P3P RESERVEPAY] Debit request ₹${amount_inr} for ${order_id} (${purpose})`);
+      const perCartLimit = Number(process.env.PER_CART_LIMIT_INR || 500);
 
       // Check per-cart limit
-      const perCartLimit = Number(process.env.PER_CART_LIMIT_INR || 500);
       if (amount_inr > perCartLimit) {
         return {
           content: [{
@@ -1112,34 +1112,30 @@ function createMcpServer() {
               status: "REJECTED_OVER_CART_LIMIT",
               amount_inr,
               per_cart_limit_inr: perCartLimit,
-              remaining_balance_inr: weeklyWallet.balance_inr,
-              error_code: "P3P_CART_LIMIT_EXCEEDED",
-              reason: `Transaction amount ₹${amount_inr} exceeds autonomous per-cart ceiling of ₹${perCartLimit}. Human approval required.`
+              remaining_balance_inr: globalThis.rasoiWallet.balance,
+              reason: `Amount ₹${amount_inr} exceeds autonomous per-cart ceiling of ₹${perCartLimit}. Human approval required.`
             }, null, 2)
           }]
         };
       }
 
-      // Check weekly balance sufficiency
-      if (amount_inr > weeklyWallet.balance_inr) {
+      // Check wallet balance
+      if (amount_inr > globalThis.rasoiWallet.balance) {
         return {
           content: [{
             type: "text",
             text: JSON.stringify({
               status: "REJECTED_INSUFFICIENT_FUNDS",
               amount_inr,
-              remaining_balance_inr: weeklyWallet.balance_inr,
-              error_code: "P3P_INSUFFICIENT_WEEKLY_BALANCE",
-              reason: `Insufficient weekly wallet balance (₹${weeklyWallet.balance_inr}). Cannot debit ₹${amount_inr}.`
+              remaining_balance_inr: globalThis.rasoiWallet.balance,
+              reason: `Insufficient weekly wallet balance (₹${globalThis.rasoiWallet.balance}). Cannot debit ₹${amount_inr}.`
             }, null, 2)
           }]
         };
       }
 
-      // Deduct balance
-      weeklyWallet.balance_inr -= amount_inr;
-      const lowBalanceAlert = weeklyWallet.balance_inr < 200;
-      const txnId = `PL_TXN_${Date.now()}`;
+      globalThis.rasoiWallet.balance -= amount_inr;
+      const isLow = globalThis.rasoiWallet.balance < 200;
 
       return {
         content: [{
@@ -1147,20 +1143,21 @@ function createMcpServer() {
           text: JSON.stringify({
             status: "SUCCESS",
             rail: "pine_labs_p3p_reservepay",
-            transaction_id: txnId,
+            transaction_id: `PL_TXN_${Date.now()}`,
             mid: process.env.PINELABS_MID || "131146",
             order_id,
             amount_inr,
             purpose,
-            remaining_balance_inr: weeklyWallet.balance_inr,
-            low_balance_alert: lowBalanceAlert,
-            alert_message: lowBalanceAlert ? `WARNING: Weekly grocery wallet balance is low (₹${weeklyWallet.balance_inr} remaining, below ₹200 threshold).` : null,
+            remaining_balance_inr: globalThis.rasoiWallet.balance,
+            low_balance_alert: isLow,
+            alert_message: isLow ? `WARNING: Grocery balance is critically low (₹${globalThis.rasoiWallet.balance} remaining, below ₹200 threshold).` : null,
             timestamp: new Date().toISOString()
           }, null, 2)
         }]
       };
     }
   );
+
 
 
   return server;
