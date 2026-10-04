@@ -1065,6 +1065,64 @@ function createMcpServer() {
     }
   );
 
+  
+  // Tool 11: Pine Labs P3P ReservePay Rail
+  server.tool(
+    "pinelabs_reservepay_debit",
+    "Execute autonomous agent-to-agent procurement debit via Pine Labs P3P ReservePay",
+    {
+      amount_inr: z.number().positive().describe("Total transaction amount in INR to debit"),
+      order_id: z.string().describe("Unique merchant/procurement order reference ID"),
+      purpose: z.string().describe("Itemized summary or reason for procurement"),
+      simulate_failure: z.enum(["none", "insufficient_balance", "network_timeout"]).optional().default("none")
+    },
+    async ({ amount_inr, order_id, purpose, simulate_failure }) => {
+      console.log(`[P3P RESERVEPAY] Processing debit of ₹${amount_inr} for order: ${order_id} (${purpose})`);
+      const limit = Number(process.env.PER_CART_LIMIT_INR || 500);
+
+      if (simulate_failure === "network_timeout") {
+        return {
+          isError: true,
+          content: [{ type: "text", text: "Pine Labs Gateway Timeout (HTTP 504): Settlement rail unresponsive." }]
+        };
+      }
+
+      if (simulate_failure === "insufficient_balance" || amount_inr > limit) {
+        console.warn(`[P3P RESERVEPAY] Amount ₹${amount_inr} rejected (limit: ₹${limit})`);
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              status: "REJECTED_OVER_LIMIT",
+              amount_inr,
+              limit_inr: limit,
+              error_code: "P3P_LIMIT_EXCEEDED",
+              reason: `Transaction amount ₹${amount_inr} exceeds autonomous per-cart limit of ₹${limit}. Human authorization required.`
+            }, null, 2)
+          }]
+        };
+      }
+
+      const txnId = `PL_TXN_${Date.now()}`;
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            status: "SUCCESS",
+            rail: "pine_labs_p3p_reservepay",
+            transaction_id: txnId,
+            mid: process.env.PINELABS_MID || "131146",
+            order_id,
+            amount_inr,
+            purpose,
+            settlement_mode: "instant_agent_rail",
+            timestamp: new Date().toISOString()
+          }, null, 2)
+        }]
+      };
+    }
+  );
+
   return server;
 }
 
