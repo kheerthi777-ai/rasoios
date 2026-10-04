@@ -7,6 +7,7 @@ import pg from 'pg';
 import { GoogleGenAI } from '@google/genai';
 import { randomUUID } from 'crypto';
 import 'dotenv/config';
+import { applyCartGates, mealSituation, planFromStock } from './household-rules.js';
 
 const app = express();
 app.use(cors());
@@ -262,17 +263,6 @@ function isBusyModelError(err) {
   return /503|429|UNAVAILABLE|high demand|resource exhausted/i.test(String(err?.message || err));
 }
 
-function mealSituation(now = istParts(), userText = '') {
-  const weekend = now.weekday === 'Sat' || now.weekday === 'Sun';
-  const hour = Number(now.hour);
-  const meal = hour < 11 ? 'breakfast' : hour < 16 ? 'lunch' : 'dinner';
-  const crunch = /10\s*min/i.test(userText) || (meal === 'breakfast' && !weekend);
-  const minutes = crunch ? 10 : weekend ? 45 : 25;
-  const effort = crunch || !weekend ? 'low' : 'high';
-  const cookAvailable = process.env.COOK_AVAILABLE !== 'false';
-  return { weekend, meal, minutes, effort, cookAvailable, day: now.weekday };
-}
-
 async function generateKitchenText(contents) {
   if (!process.env.GEMINI_API_KEY) return null;
   let lastError;
@@ -334,30 +324,20 @@ async function weeklyCartSpend() {
   return rows[0]?.spent || 0;
 }
 
-function applyCartGates(plan) {
-  const cartLimit = Number(process.env.PER_CART_LIMIT_INR || 300);
-  const weeklyBudget = Number(process.env.WEEKLY_BUDGET_INR || 2000);
-  const cart = Array.isArray(plan.cart) ? plan.cart : [];
-  const missing = Array.isArray(plan.missing) ? plan.missing : [];
-  const cartTotal = cart.reduce((sum, line) => sum + (Number(line.estimated_inr) || 0), 0);
-  const blocked = missing.filter((item) => item && item.role === 'main' && !item.substitute);
-  let humanRequired = Boolean(plan.human_required) || blocked.length > 0;
-  let humanReason = plan.human_reason || '';
-  if (blocked.length) {
-    humanReason = `No substitute for ${blocked.map((item) => item.item).join(', ')}.`;
-  }
-  if (cartTotal > cartLimit) {
-    humanRequired = true;
-    humanReason = `Cart is ₹${cartTotal}, above the ₹${cartLimit} limit.`;
-  }
-  return { cart, missing, cartTotal, cartLimit, weeklyBudget, humanRequired, humanReason };
-}
-
 async function decideHouseholdMeal({ chatId, fromName, userText, mood }) {
-  const situation = mealSituation(istParts(), userText);
+  const situation = mealSituation(istParts(), userText, {
+    cookAvailable: process.env.COOK_AVAILABLE !== 'false'
+  });
   const { taste, stock } = await loadHouseholdContext();
   const spent = await weeklyCartSpend();
-  const raw = await generateKitchenText([
+  const limits = {
+    cartLimit: Number(process.env.PER_CART_LIMIT_INR || 300),
+    weeklyBudget: Number(process.env.WEEKLY_BUDGET_INR || 2000),
+    spent
+  };
+  let raw = null;
+  try {
+    raw = await generateKitchenText([
     'Return one JSON object only. No markdown.',
     'You are deciding a real household meal. The wife is not typing. Decide from the stock.',
     'Main ingredient must be present. About 80% of the other ingredients must be present.',
@@ -375,21 +355,13 @@ async function decideHouseholdMeal({ chatId, fromName, userText, mood }) {
     `From: ${fromName || 'household'}`,
     `Taste: ${JSON.stringify(taste)}`,
     `Stock: ${JSON.stringify(stock)}`
-  ].join('\n'));
-  const plan = parsePlan(raw || '') || {
-    family_text: raw || 'I could not decide a meal from the stock.',
-    kids_text: '',
-    cook_text_hi: '',
-    missing: [],
-    cart: [],
-    human_required: false,
-    human_reason: ''
-  };
-  const gates = applyCartGates(plan);
-  if (spent + gates.cartTotal > gates.weeklyBudget) {
-    gates.humanRequired = true;
-    gates.humanReason = `This cart would take the week to ₹${spent + gates.cartTotal}, above ₹${gates.weeklyBudget}.`;
+    ].join('\n'));
+  } catch (err) {
+    if (!isBusyModelError(err)) throw err;
+    console.error('[MEAL] model busy, using the stock decision');
   }
+  const plan = (raw && parsePlan(raw)) || planFromStock(stock, situation, mood, userText);
+  const gates = applyCartGates(plan, limits);
   const cartLine = gates.cartTotal > 0
     ? `Cart ₹${gates.cartTotal}. Limit ₹${gates.cartLimit}. Weekly spend so far ₹${spent} of ₹${gates.weeklyBudget}.`
     : 'No delivery cart. The meal can be made from what is already in the house.';
