@@ -156,6 +156,95 @@ function isHouseholdChat(chat) {
   return chat.type === 'private' || chat.type === 'group' || chat.type === 'supergroup';
 }
 
+function istParts(date = new Date()) {
+  const fmt = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23'
+  });
+  return Object.fromEntries(fmt.formatToParts(date).map((part) => [part.type, part.value]));
+}
+
+function moodSlots() {
+  const raw = process.env.TELEGRAM_MOOD_SCHEDULE || '10:30,14:30,21:30';
+  return raw.split(',').map((value) => value.trim()).filter(Boolean).map((time) => {
+    const [hour, minute] = time.split(':').map(Number);
+    const label = hour < 12 ? 'Breakfast' : hour < 17 ? 'Lunch' : 'Dinner';
+    return { time, minutes: hour * 60 + minute, label };
+  });
+}
+
+function mentionedMood(text) {
+  const match = String(text).toLowerCase().match(/\b(light|medium|heavy)\b/);
+  return match ? match[1] : null;
+}
+
+async function ensureMoodTables() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS household_mood (
+      id BIGSERIAL PRIMARY KEY,
+      chat_id TEXT NOT NULL,
+      mood TEXT NOT NULL,
+      meal_label TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS mood_prompts (
+      slot_key TEXT PRIMARY KEY,
+      sent_at TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+}
+
+async function saveMood(chatId, mood, mealLabel) {
+  await ensureMoodTables();
+  await pool.query(
+    `INSERT INTO household_mood (chat_id, mood, meal_label) VALUES ($1, $2, $3)`,
+    [String(chatId), mood, mealLabel || null]
+  );
+}
+
+async function latestMood(chatId) {
+  await ensureMoodTables();
+  const { rows } = await pool.query(
+    `SELECT mood, meal_label, created_at
+     FROM household_mood
+     WHERE chat_id = $1
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [String(chatId)]
+  );
+  return rows[0] || null;
+}
+
+async function maybeSendMoodPrompt() {
+  if (!process.env.TELEGRAM_BOT_TOKEN) return { sent: [] };
+  const chatId = process.env.TELEGRAM_GROUP_CHAT_ID || process.env.TELEGRAM_CHAT_ID;
+  if (!chatId) return { sent: [] };
+  await ensureMoodTables();
+  const now = istParts();
+  const nowMinutes = Number(now.hour) * 60 + Number(now.minute);
+  const day = `${now.year}-${now.month}-${now.day}`;
+  const sent = [];
+  for (const slot of moodSlots()) {
+    if (nowMinutes < slot.minutes || nowMinutes >= slot.minutes + 45) continue;
+    const slotKey = `${day}|${slot.time}`;
+    const inserted = await pool.query(
+      `INSERT INTO mood_prompts (slot_key) VALUES ($1) ON CONFLICT DO NOTHING RETURNING slot_key`,
+      [slotKey]
+    );
+    if (!inserted.rows.length) continue;
+    const text = `${slot.label} is done. What should the next meal feel like: light, medium, or heavy?`;
+    await deliverTelegram(text, String(chatId));
+    console.log(`[MOOD] Asked after ${slot.label} in chat ${chatId}`);
+    sent.push(slotKey);
+  }
+  return { sent };
+}
+
 async function loadHouseholdContext() {
   const taste = await pool.query(
     `SELECT category, preference FROM taste_profiles ORDER BY category ASC`
@@ -172,7 +261,7 @@ function isBusyModelError(err) {
   return /503|429|UNAVAILABLE|high demand|resource exhausted/i.test(String(err?.message || err));
 }
 
-async function suggestFromHousehold(text, fromName) {
+async function suggestFromHousehold(text, fromName, mood) {
   if (!process.env.GEMINI_API_KEY) return null;
   const { taste, stock } = await loadHouseholdContext();
   const contents = [
@@ -182,8 +271,10 @@ async function suggestFromHousehold(text, fromName) {
     'Do not suggest a paneer dish if paneer quantity is 0. Prefer usable_today leftovers and chutneys.',
     'About 80% of the other ingredients must be present. Name any missing garnish in one line.',
     'Taste rules: toast bread firm, no raw onion, medium spice, light oil, fry paneer before gravy.',
+    'Match the recorded mood: light means simpler and smaller, heavy means a fuller plate. Do not ask for the mood again.',
     'Reply in plain text, under 900 characters, ready to send on Telegram.',
     `From: ${fromName || 'household'}`,
+    `Mood: ${mood || 'not recorded'}`,
     `Message: ${text}`,
     `Taste: ${JSON.stringify(taste)}`,
     `Stock: ${JSON.stringify(stock)}`
@@ -217,13 +308,20 @@ async function handleTelegramUpdate(update) {
   const fromName = [message.from?.first_name, message.from?.last_name].filter(Boolean).join(' ');
   console.log(`[TELEGRAM IN] chat=${chat.id} from=${fromName} text=${message.text}`);
   const text = message.text.trim();
+  const moodWord = mentionedMood(text);
+  const moodOnly = /^(light|medium|heavy)\.?$/i.test(text);
   let reply;
   try {
     if (/^\/start\b/i.test(text)) {
       reply = 'RasoiOS is here. Ask "what should we cook?"';
+    } else if (moodOnly && moodWord) {
+      await saveMood(chat.id, moodWord, 'reply');
+      reply = `Noted. The next meal will be ${moodWord}.`;
     } else {
+      if (moodWord) await saveMood(chat.id, moodWord, 'reply');
+      const mood = moodWord || (await latestMood(chat.id))?.mood;
       reply = await askConductor(text, fromName);
-      if (!reply) reply = await suggestFromHousehold(text, fromName);
+      if (!reply) reply = await suggestFromHousehold(text, fromName, mood);
     }
   } catch (err) {
     console.error('[TELEGRAM] reply failed:', err);
@@ -786,6 +884,16 @@ app.get('/sse', async (req, res) => {
   await server.connect(transport);
 });
 
+app.post('/cron/mood', async (req, res) => {
+  try {
+    const result = await maybeSendMoodPrompt();
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error('[MOOD] prompt failed:', err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get('/telegram/status', async (req, res) => {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken) return res.status(503).json({ ok: false, error: 'TELEGRAM_BOT_TOKEN is not set' });
@@ -837,4 +945,9 @@ app.listen(PORT, () => {
   registerTelegramWebhook().catch((err) => {
     console.error('[TELEGRAM] webhook registration failed:', err);
   });
+  setInterval(() => {
+    maybeSendMoodPrompt().catch((err) => {
+      console.error('[MOOD] prompt failed:', err);
+    });
+  }, 60 * 1000);
 });
