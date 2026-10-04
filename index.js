@@ -162,6 +162,7 @@ function istParts(date = new Date()) {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
+    weekday: 'short',
     hour: '2-digit',
     minute: '2-digit',
     hourCycle: 'h23'
@@ -261,24 +262,19 @@ function isBusyModelError(err) {
   return /503|429|UNAVAILABLE|high demand|resource exhausted/i.test(String(err?.message || err));
 }
 
-async function suggestFromHousehold(text, fromName, mood) {
+function mealSituation(now = istParts(), userText = '') {
+  const weekend = now.weekday === 'Sat' || now.weekday === 'Sun';
+  const hour = Number(now.hour);
+  const meal = hour < 11 ? 'breakfast' : hour < 16 ? 'lunch' : 'dinner';
+  const crunch = /10\s*min/i.test(userText) || (meal === 'breakfast' && !weekend);
+  const minutes = crunch ? 10 : weekend ? 45 : 25;
+  const effort = crunch || !weekend ? 'low' : 'high';
+  const cookAvailable = process.env.COOK_AVAILABLE !== 'false';
+  return { weekend, meal, minutes, effort, cookAvailable, day: now.weekday };
+}
+
+async function generateKitchenText(contents) {
   if (!process.env.GEMINI_API_KEY) return null;
-  const { taste, stock } = await loadHouseholdContext();
-  const contents = [
-    'You are the RasoiOS kitchen conductor answering a household Telegram message.',
-    'Use only the stock and taste rows below. Do not invent a quantity.',
-    'Suggest two or three dishes that can be made now. The main ingredient must be present.',
-    'Do not suggest a paneer dish if paneer quantity is 0. Prefer usable_today leftovers and chutneys.',
-    'About 80% of the other ingredients must be present. Name any missing garnish in one line.',
-    'Taste rules: toast bread firm, no raw onion, medium spice, light oil, fry paneer before gravy.',
-    'Match the recorded mood: light means simpler and smaller, heavy means a fuller plate. Do not ask for the mood again.',
-    'Reply in plain text, under 900 characters, ready to send on Telegram.',
-    `From: ${fromName || 'household'}`,
-    `Mood: ${mood || 'not recorded'}`,
-    `Message: ${text}`,
-    `Taste: ${JSON.stringify(taste)}`,
-    `Stock: ${JSON.stringify(stock)}`
-  ].join('\n');
   let lastError;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
@@ -295,6 +291,194 @@ async function suggestFromHousehold(text, fromName, mood) {
     }
   }
   throw lastError;
+}
+
+function parsePlan(text) {
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start < 0 || end < start) return null;
+  try {
+    return JSON.parse(text.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+}
+
+async function ensureRunTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS household_runs (
+      id BIGSERIAL PRIMARY KEY,
+      chat_id TEXT,
+      meal TEXT,
+      effort TEXT,
+      minutes INTEGER,
+      weekend BOOLEAN,
+      mood TEXT,
+      cart_total INTEGER,
+      human_required BOOLEAN,
+      human_reason TEXT,
+      plan JSONB,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+}
+
+async function weeklyCartSpend() {
+  await ensureRunTable();
+  const { rows } = await pool.query(`
+    SELECT COALESCE(SUM(cart_total), 0)::int AS spent
+    FROM household_runs
+    WHERE human_required = false
+      AND created_at >= date_trunc('week', NOW() AT TIME ZONE 'Asia/Kolkata')
+  `);
+  return rows[0]?.spent || 0;
+}
+
+function applyCartGates(plan) {
+  const cartLimit = Number(process.env.PER_CART_LIMIT_INR || 300);
+  const weeklyBudget = Number(process.env.WEEKLY_BUDGET_INR || 2000);
+  const cart = Array.isArray(plan.cart) ? plan.cart : [];
+  const missing = Array.isArray(plan.missing) ? plan.missing : [];
+  const cartTotal = cart.reduce((sum, line) => sum + (Number(line.estimated_inr) || 0), 0);
+  const blocked = missing.filter((item) => item && item.role === 'main' && !item.substitute);
+  let humanRequired = Boolean(plan.human_required) || blocked.length > 0;
+  let humanReason = plan.human_reason || '';
+  if (blocked.length) {
+    humanReason = `No substitute for ${blocked.map((item) => item.item).join(', ')}.`;
+  }
+  if (cartTotal > cartLimit) {
+    humanRequired = true;
+    humanReason = `Cart is ₹${cartTotal}, above the ₹${cartLimit} limit.`;
+  }
+  return { cart, missing, cartTotal, cartLimit, weeklyBudget, humanRequired, humanReason };
+}
+
+async function decideHouseholdMeal({ chatId, fromName, userText, mood }) {
+  const situation = mealSituation(istParts(), userText);
+  const { taste, stock } = await loadHouseholdContext();
+  const spent = await weeklyCartSpend();
+  const raw = await generateKitchenText([
+    'Return one JSON object only. No markdown.',
+    'You are deciding a real household meal. The wife is not typing. Decide from the stock.',
+    'Main ingredient must be present. About 80% of the other ingredients must be present.',
+    'The missing 20% can be a garnish or a side. Prefer usable_today leftovers and chutneys.',
+    'Do not suggest paneer if its quantity is 0. Do not invent a quantity that is not in stock.',
+    'Taste rules: toast bread firm, no raw onion, medium spice for adults, light oil, fry paneer before gravy.',
+    'Kids get a milder plate from the same stock, with less chilli.',
+    'Weekday or a 10-minute breakfast is low effort. Weekend, when there is time, is high effort.',
+    'If the cook is available, cook_text_hi is short Hindi imperatives for Nani. If the cook is not available, cook_text_hi explains the family must do the steps.',
+    'missing: only items not in stock. role is main or garnish. substitute is a stock item name, "skip", or null.',
+    'A missing garnish can be skipped. A missing main with substitute null means human_required true.',
+    'cart lists only items to buy. estimated_inr is a rough rupee number. Do not put skipped garnish in the cart.',
+    'JSON keys: family_text, kids_text, cook_text_hi, missing, cart, human_required, human_reason.',
+    `Situation: ${JSON.stringify({ ...situation, mood: mood || 'not recorded', weekly_spent_inr: spent, user_text: userText || 'scheduled decision' })}`,
+    `From: ${fromName || 'household'}`,
+    `Taste: ${JSON.stringify(taste)}`,
+    `Stock: ${JSON.stringify(stock)}`
+  ].join('\n'));
+  const plan = parsePlan(raw || '') || {
+    family_text: raw || 'I could not decide a meal from the stock.',
+    kids_text: '',
+    cook_text_hi: '',
+    missing: [],
+    cart: [],
+    human_required: false,
+    human_reason: ''
+  };
+  const gates = applyCartGates(plan);
+  if (spent + gates.cartTotal > gates.weeklyBudget) {
+    gates.humanRequired = true;
+    gates.humanReason = `This cart would take the week to ₹${spent + gates.cartTotal}, above ₹${gates.weeklyBudget}.`;
+  }
+  const cartLine = gates.cartTotal > 0
+    ? `Cart ₹${gates.cartTotal}. Limit ₹${gates.cartLimit}. Weekly spend so far ₹${spent} of ₹${gates.weeklyBudget}.`
+    : 'No delivery cart. The meal can be made from what is already in the house.';
+  const gateLine = gates.humanRequired
+    ? `A person needs to decide: ${gates.humanReason}`
+    : 'No person is needed for this meal.';
+  const family = [
+    plan.family_text,
+    plan.kids_text ? `Kids: ${plan.kids_text}` : '',
+    `${situation.day} ${situation.meal}. ${situation.effort} effort, ${situation.minutes} minutes. Mood: ${mood || 'not recorded'}.`,
+    cartLine,
+    gateLine
+  ].filter(Boolean).join('\n\n');
+  const cook = plan.cook_text_hi || 'Cook steps were not ready.';
+  await ensureRunTable();
+  await pool.query(
+    `INSERT INTO household_runs
+      (chat_id, meal, effort, minutes, weekend, mood, cart_total, human_required, human_reason, plan)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+    [
+      chatId ? String(chatId) : null,
+      situation.meal,
+      situation.effort,
+      situation.minutes,
+      situation.weekend,
+      mood || null,
+      gates.cartTotal,
+      gates.humanRequired,
+      gates.humanReason || null,
+      JSON.stringify({ ...plan, gates })
+    ]
+  );
+  return { family, cook, situation, gates };
+}
+
+async function dispatchHouseholdMeal({ chatId, fromName, userText, mood }) {
+  const decision = await decideHouseholdMeal({ chatId, fromName, userText, mood });
+  const familyChat = String(chatId || process.env.TELEGRAM_GROUP_CHAT_ID || process.env.TELEGRAM_CHAT_ID);
+  await deliverTelegram(decision.family, familyChat);
+  const cookChat = process.env.TELEGRAM_COOK_CHAT_ID || familyChat;
+  const cookText = cookChat === familyChat
+    ? `For Nani:\n${decision.cook}`
+    : decision.cook;
+  await deliverTelegram(cookText, cookChat);
+  return decision;
+}
+
+async function maybeSendMealDecision() {
+  if (!process.env.TELEGRAM_BOT_TOKEN) return { sent: [] };
+  const chatId = process.env.TELEGRAM_GROUP_CHAT_ID || process.env.TELEGRAM_CHAT_ID;
+  if (!chatId) return { sent: [] };
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS meal_decisions (
+      slot_key TEXT PRIMARY KEY,
+      sent_at TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+  const now = istParts();
+  const nowMinutes = Number(now.hour) * 60 + Number(now.minute);
+  const day = `${now.year}-${now.month}-${now.day}`;
+  const slots = (process.env.TELEGRAM_DECISION_SCHEDULE || '07:30,12:30,19:30')
+    .split(',').map((value) => value.trim()).filter(Boolean);
+  const sent = [];
+  for (const time of slots) {
+    const [hour, minute] = time.split(':').map(Number);
+    const slotMinutes = hour * 60 + minute;
+    if (nowMinutes < slotMinutes || nowMinutes >= slotMinutes + 45) continue;
+    const slotKey = `${day}|${time}`;
+    const inserted = await pool.query(
+      `INSERT INTO meal_decisions (slot_key) VALUES ($1) ON CONFLICT DO NOTHING RETURNING slot_key`,
+      [slotKey]
+    );
+    if (!inserted.rows.length) continue;
+    const mood = (await latestMood(chatId))?.mood;
+    await dispatchHouseholdMeal({ chatId, fromName: 'schedule', userText: 'scheduled meal', mood });
+    console.log(`[MEAL] Decided ${time} for chat ${chatId}`);
+    sent.push(slotKey);
+  }
+  return { sent };
+}
+
+async function suggestFromHousehold(text, fromName, mood) {
+  const decision = await decideHouseholdMeal({
+    chatId: null,
+    fromName,
+    userText: text,
+    mood
+  });
+  return `${decision.family}\n\nFor Nani:\n${decision.cook}`;
 }
 
 async function handleTelegramUpdate(update) {
@@ -320,8 +504,15 @@ async function handleTelegramUpdate(update) {
     } else {
       if (moodWord) await saveMood(chat.id, moodWord, 'reply');
       const mood = moodWord || (await latestMood(chat.id))?.mood;
-      reply = await askConductor(text, fromName);
-      if (!reply) reply = await suggestFromHousehold(text, fromName, mood);
+      const decision = await dispatchHouseholdMeal({
+        chatId: chat.id,
+        fromName,
+        userText: text,
+        mood
+      });
+      reply = decision.cook && process.env.TELEGRAM_COOK_CHAT_ID
+        ? null
+        : '';
     }
   } catch (err) {
     console.error('[TELEGRAM] reply failed:', err);
@@ -329,11 +520,10 @@ async function handleTelegramUpdate(update) {
       ? 'The kitchen model is busy right now. Ask "what should we cook?" again in a minute.'
       : `I got the message, and the kitchen reply failed: ${err.message}`;
   }
-  if (!reply) {
-    reply = `Got it. Chat id ${chat.id}. Set TELEGRAM_GROUP_CHAT_ID to this id if this is the household group.`;
+  if (reply) {
+    const receipt = await deliverTelegram(reply, String(chat.id));
+    console.log(`[TELEGRAM OUT] chat=${receipt.chat_id} message_id=${receipt.message_id}`);
   }
-  const receipt = await deliverTelegram(reply, String(chat.id));
-  console.log(`[TELEGRAM OUT] chat=${receipt.chat_id} message_id=${receipt.message_id}`);
 }
 
 async function registerTelegramWebhook() {
@@ -884,6 +1074,31 @@ app.get('/sse', async (req, res) => {
   await server.connect(transport);
 });
 
+app.post('/cron/decide', async (req, res) => {
+  try {
+    const chatId = process.env.TELEGRAM_GROUP_CHAT_ID || process.env.TELEGRAM_CHAT_ID;
+    const mood = chatId ? (await latestMood(chatId))?.mood : null;
+    const decision = await dispatchHouseholdMeal({
+      chatId,
+      fromName: 'schedule',
+      userText: 'decide now',
+      mood
+    });
+    res.json({
+      ok: true,
+      meal: decision.situation.meal,
+      effort: decision.situation.effort,
+      minutes: decision.situation.minutes,
+      human_required: decision.gates.humanRequired,
+      human_reason: decision.gates.humanReason || null,
+      cart_total_inr: decision.gates.cartTotal
+    });
+  } catch (err) {
+    console.error('[MEAL] decide failed:', err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.post('/cron/mood', async (req, res) => {
   try {
     const result = await maybeSendMoodPrompt();
@@ -948,6 +1163,9 @@ app.listen(PORT, () => {
   setInterval(() => {
     maybeSendMoodPrompt().catch((err) => {
       console.error('[MOOD] prompt failed:', err);
+    });
+    maybeSendMealDecision().catch((err) => {
+      console.error('[MEAL] decision failed:', err);
     });
   }, 60 * 1000);
 });
